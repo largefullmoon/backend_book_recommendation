@@ -1,0 +1,8 @@
+flask==2.3.3
+flask-cors==4.0.0
+pymongo==4.5.0
+python-dotenv==1.0.0
+openai==0.28.1
+requests==2.31.0
+sendgrid==6.10.0
+twilio==8.10.0
