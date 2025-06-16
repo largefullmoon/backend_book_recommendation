@@ -599,7 +599,6 @@ def generate_recommendation_plan():
             book_info = f"""Book {idx}:
 Title: {book['title']}
 Author: {book['author']}
-Description: {book.get('description', 'No description available')}
 Genres: {', '.join(book.get('genres', []))}
 Age Range: {book.get('ageRange', {}).get('min', 0)}-{book.get('ageRange', {}).get('max', 99)}
 ---"""
@@ -637,7 +636,7 @@ Select and score the top 5 most suitable books. Distribute them across 3 months 
 
         # Get recommendations from OpenAI
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": analysis_prompt}
