@@ -299,7 +299,7 @@ def get_books():
 def add_book():
     try:
         book_data = request.json
-        required_fields = ['title', 'author', 'description', 'genres', 'ageRange']
+        required_fields = ['title', 'author', 'genres', 'ageRange']
         
         # Validate required fields
         if not all(field in book_data for field in required_fields):
