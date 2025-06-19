@@ -11,6 +11,7 @@ from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail, Content
 from twilio.rest import Client
 import json
+import re
 
 # Load environment variables
 load_dotenv()
@@ -588,7 +589,7 @@ def generate_recommendation_plan():
             return books
 
         potential_books = get_flexible_books(age, selected_genres, min_books=15)
-
+        print(potential_books)
         # Initialize empty response structure
         empty_reading_plan = [
             {
@@ -598,10 +599,10 @@ def generate_recommendation_plan():
         ]
 
         if not potential_books:
-            return jsonify({
-                'current': [],
-                'future': empty_reading_plan
-            })
+            # Fallback: return empty, or you can return a default set of books here
+            fallback_books = []
+        else:
+            fallback_books = potential_books
 
         # Prepare user interests and preferences
         interests = data['selectedInterests'] + data['nonFictionInterests']
@@ -631,8 +632,8 @@ The user is:
 - Series Preference: {'Enjoys' if data['bookSeries'] else 'Does not prefer'} book series
 
 Your task:
-1. Select the 3 most suitable books for immediate reading (\"current recommendations\").
-2. Select 4 books for each of the next 3 months (12 books total, can overlap with current recommendations if needed).
+1. You must select the 3 most suitable books for immediate reading (\"current recommendations\").
+2. You must select 4 books for each of the next 3 months (12 books total, can overlap with current recommendations if needed).
 3. For each book, provide:
    - title
    - author
@@ -658,35 +659,58 @@ Return your response in JSON:
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": analysis_prompt}
-            ],
-            temperature=0.7,
-            max_tokens=2000
+            ]
         )
 
         # Parse OpenAI response
         try:
-            analysis = json.loads(response.choices[0].message.content)
+            raw_content = response.choices[0].message.content
+            print("OpenAI raw response:", raw_content)  # Log for debugging
+
+            # Try to extract JSON if wrapped in code block
+            match = re.search(r"\{.*\}", raw_content, re.DOTALL)
+            json_str = match.group(0) if match else raw_content
+
+            analysis = json.loads(json_str)
             current_recs = analysis.get('current', [])
             future_recs = analysis.get('future', [])
 
-            # Build reading plan for future months
-            reading_plan = []
-            for month_info in future_recs:
-                month_idx = month_info.get('month', 1) - 1
-                month_name = (datetime.now().replace(day=1) + timedelta(days=month_idx*31)).strftime('%B')
-                books = month_info.get('books', [])
-                reading_plan.append({
-                    'month': month_name,
-                    'books': books
-                })
+            if not current_recs:
+                # Fallback: select top related books
+                current_recs = [
+                    {
+                        'title': book['title'],
+                        'author': book['author'],
+                        'explanation': 'Selected as a top related book based on your preferences.'
+                    }
+                    for book in fallback_books[:3]
+                ]
+
+            if not future_recs:
+                # Fallback: select top related books
+                future_recs = [
+                    {
+                        'month': (datetime.now().replace(day=1) + timedelta(days=i*31)).strftime('%B'),
+                        'books': [
+                            {
+                                'title': book['title'],
+                                'author': book['author'],
+                                'explanation': 'Selected as a top related book based on your preferences.'
+                            }
+                            for book in fallback_books[3 + i*4 : 3 + (i+1)*4]
+                        ]
+                    }
+                    for i in range(3)
+                ]
 
             return jsonify({
                 'current': current_recs,
-                'future': reading_plan
+                'future': future_recs
             })
 
         except json.JSONDecodeError as e:
             print(f"Error parsing OpenAI response: {str(e)}")
+            print("Raw response was:", raw_content)
             # Return empty results instead of error
             return jsonify({
                 'current': [],
@@ -779,37 +803,67 @@ def send_whatsapp_recommendations():
                 'error': 'Missing required fields'
             }), 400
 
+        # Helper to format phone number (basic, expects E.164 or adds '+')
+        def format_phone_number(phone):
+            phone = str(phone).strip()
+            if phone.startswith('+'):
+                return phone
+            # Add your country code logic here if needed
+            return '+' + phone
+
+        # Helper to format book entry
+        def format_book_entry(book):
+            if isinstance(book, dict):
+                title = book.get('title', 'Unknown Title')
+                author = book.get('author', 'Unknown Author')
+                return f"{title} by {author}"
+            return str(book)
+
         # Format the message
         message_body = f"Hello! Here are the book recommendations for {data['name']}:\n\n"
         message_body += "📚 Recommended Books:\n"
         for book in data['recommendations']:
-            message_body += f"• {book['title']} by {book['author']}\n"
+            message_body += f"• {format_book_entry(book)}\n"
         
         message_body += "\n📅 3-Month Reading Plan:\n"
         for month in data['readingPlan']:
-            message_body += f"\n{month['month']}:\n"
-            for book in month['books']:
-                message_body += f"• {book}\n"
+            month_name = month.get('month', 'Month')
+            message_body += f"\n{month_name}:\n"
+            for book in month.get('books', []):
+                message_body += f"• {format_book_entry(book)}\n"
         
         message_body += "\nHappy Reading! 📖"
 
-        # Initialize Twilio client
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        # WhatsApp message length limit (Twilio: 4096 chars)
+        MAX_LENGTH = 4096
+        if len(message_body) > MAX_LENGTH:
+            message_body = message_body[:MAX_LENGTH-20] + '\n...[truncated]'
+
+        # Initialize Twilio client (renamed to twilio_client)
+        twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+        # Format phone number
+        to_phone = format_phone_number(data['phone'])
 
         # Send WhatsApp message
-        message = client.messages.create(
-            body=message_body,
-            from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
-            to=f"whatsapp:{data['phone']}"
-        )
+        try:
+            message = twilio_client.messages.create(
+                body=message_body,
+                from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
+                to=f"whatsapp:{to_phone}"
+            )
+        except Exception as twilio_error:
+            return jsonify({
+                'error': f'Failed to send WhatsApp message: {str(twilio_error)}'
+            }), 500
 
-        if message.sid:
+        if hasattr(message, 'sid') and message.sid:
             return jsonify({
                 'message': 'Recommendations sent successfully to WhatsApp'
             })
         else:
             return jsonify({
-                'error': 'Failed to send WhatsApp message'
+                'error': 'Failed to send WhatsApp message (no SID returned)'
             }), 500
 
     except Exception as e:
