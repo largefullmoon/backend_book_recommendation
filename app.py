@@ -563,16 +563,31 @@ def generate_recommendation_plan():
                 'error': 'Missing required fields'
             }), 400
 
-        # Get age-appropriate books based on user's age
         age = data['age']
-        age_group = '4-7' if age < 8 else '8-10' if age < 11 else '11+'
+        selected_genres = data['selectedGenres']
+        
+        # Flexible book query to ensure enough books
+        def get_flexible_books(age, selected_genres, min_books=15):
+            # 1. Try strict filter
+            books = list(books_collection.find({
+                'genres': {'$in': selected_genres},
+                'ageRange.min': {'$lte': age},
+                'ageRange.max': {'$gte': age}
+            }))
+            if len(books) >= min_books:
+                return books
+            # 2. Relax genre filter
+            books = list(books_collection.find({
+                'ageRange.min': {'$lte': age},
+                'ageRange.max': {'$gte': age}
+            }))
+            if len(books) >= min_books:
+                return books
+            # 3. Relax age filter
+            books = list(books_collection.find())
+            return books
 
-        # Get all potential books matching age range and genres
-        potential_books = list(books_collection.find({
-            'genres': {'$in': data['selectedGenres']},
-            'ageRange.min': {'$lte': age},
-            'ageRange.max': {'$gte': age}
-        }))
+        potential_books = get_flexible_books(age, selected_genres, min_books=15)
 
         # Initialize empty response structure
         empty_reading_plan = [
@@ -582,55 +597,58 @@ def generate_recommendation_plan():
             } for i in range(3)
         ]
 
-        # If no books found, return empty results
         if not potential_books:
             return jsonify({
-                'recommendations': [],
-                'readingPlan': empty_reading_plan
+                'current': [],
+                'future': empty_reading_plan
             })
 
         # Prepare user interests and preferences
         interests = data['selectedInterests'] + data['nonFictionInterests']
         interests_str = ', '.join(interests)
 
-        # Create a single context with all books
+        # Create a single context with all books, including description if available
         books_context = []
         for idx, book in enumerate(potential_books, 1):
+            desc = book.get('description', 'No description available.')
             book_info = f"""Book {idx}:
 Title: {book['title']}
 Author: {book['author']}
 Genres: {', '.join(book.get('genres', []))}
+Description: {desc}
 Age Range: {book.get('ageRange', {}).get('min', 0)}-{book.get('ageRange', {}).get('max', 99)}
 ---"""
             books_context.append(book_info)
 
         # Create comprehensive prompt for OpenAI
-        system_prompt = f"""You are a children's book recommendation expert. Analyze the following books and select the most suitable ones for a child with these characteristics:
+        system_prompt = f"""
+You are a children's book recommendation expert. You will receive a list of books (with title, author, genres, and description if available).
+If a description is missing, use your own knowledge of the book's content.
 
-Age: {age} years old
-Interests: {interests_str}
-Series Preference: {'Enjoys' if data['bookSeries'] else 'Does not prefer'} book series
+The user is:
+- Age: {age}
+- Interests: {interests_str}
+- Series Preference: {'Enjoys' if data['bookSeries'] else 'Does not prefer'} book series
 
-For each book, evaluate:
-1. Age appropriateness
-2. Match with interests
-3. Reading level suitability
-4. Educational value
-5. Entertainment value
+Your task:
+1. Select the 3 most suitable books for immediate reading (\"current recommendations\").
+2. Select 4 books for each of the next 3 months (12 books total, can overlap with current recommendations if needed).
+3. For each book, provide:
+   - title
+   - author
+   - explanation (why it's a good fit)
+   - month (0 for current, 1-3 for future months)
 
-Return your response in JSON format with this structure:
+Return your response in JSON:
 {{
-    "recommendations": [
-        {{
-            "book_number": <number>,
-            "score": <0-100>,
-            "explanation": <why this book is recommended>,
-            "reading_month": <1, 2, or 3 - distribute books across 3 months>
-        }}
-    ]
+  "current": [{{"title": ..., "author": ..., "explanation": ...}}, ...],
+  "future": [
+    {{"month": 1, "books": [{{"title": ..., "author": ..., "explanation": ...}}, ...]}},
+    {{"month": 2, "books": [...] }},
+    {{"month": 3, "books": [...] }}
+  ]
 }}
-
-Select and score the top 5 most suitable books. Distribute them across 3 months based on progressive reading difficulty and thematic connections."""
+"""
 
         analysis_prompt = "\n".join(books_context)
 
@@ -648,58 +666,39 @@ Select and score the top 5 most suitable books. Distribute them across 3 months 
         # Parse OpenAI response
         try:
             analysis = json.loads(response.choices[0].message.content)
-            recommendations_data = analysis.get('recommendations', [])
+            current_recs = analysis.get('current', [])
+            future_recs = analysis.get('future', [])
 
-            # Process recommendations
-            recommendations = []
-            reading_plan = [{'month': month, 'books': []} for month in [
-                (datetime.now().replace(day=1) + timedelta(days=i*31)).strftime('%B')
-                for i in range(3)
-            ]]
-
-            for rec in recommendations_data:
-                book_idx = rec['book_number'] - 1
-                if 0 <= book_idx < len(potential_books):
-                    book = potential_books[book_idx]
-                    recommendation = {
-                        'title': book['title'],
-                        'author': book['author'],
-                        'link': f"/books/{str(book['_id'])}",
-                        'score': rec['score'],
-                        'explanation': rec['explanation']
-                    }
-                    recommendations.append(recommendation)
-
-                    # Add to reading plan
-                    month_idx = rec['reading_month'] - 1
-                    if 0 <= month_idx < 3:
-                        reading_plan[month_idx]['books'].append({
-                            'title': book['title'],
-                            'explanation': rec['explanation']
-                        })
-
-            # Sort recommendations by score
-            recommendations.sort(key=lambda x: x['score'], reverse=True)
+            # Build reading plan for future months
+            reading_plan = []
+            for month_info in future_recs:
+                month_idx = month_info.get('month', 1) - 1
+                month_name = (datetime.now().replace(day=1) + timedelta(days=month_idx*31)).strftime('%B')
+                books = month_info.get('books', [])
+                reading_plan.append({
+                    'month': month_name,
+                    'books': books
+                })
 
             return jsonify({
-                'recommendations': recommendations,
-                'readingPlan': reading_plan
+                'current': current_recs,
+                'future': reading_plan
             })
 
         except json.JSONDecodeError as e:
             print(f"Error parsing OpenAI response: {str(e)}")
             # Return empty results instead of error
             return jsonify({
-                'recommendations': [],
-                'readingPlan': empty_reading_plan
+                'current': [],
+                'future': empty_reading_plan
             })
 
     except Exception as e:
         print(f"Error in generate_recommendation_plan: {str(e)}")
         # Return empty results instead of error
         return jsonify({
-            'recommendations': [],
-            'readingPlan': [
+            'current': [],
+            'future': [
                 {
                     'month': (datetime.now().replace(day=1) + timedelta(days=i*31)).strftime('%B'),
                     'books': []
