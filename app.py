@@ -12,6 +12,9 @@ from sendgrid.helpers.mail import Mail, Content
 from twilio.rest import Client
 import json
 import re
+import urllib.parse
+import time
+import pandas as pd
 
 # Load environment variables
 load_dotenv()
@@ -30,12 +33,16 @@ books_collection = db['books']
 users_collection = db['users']
 recommendations_collection = db['recommendations']
 consent_collection = db['parent_consent']
+quiz_users_collection = db['quiz_users']  # New collection for quiz users
+quiz_responses_collection = db['quiz_responses']  # New collection for detailed quiz responses
 
 # Age groups configuration
 AGE_GROUPS = ['4-7', '8-10', '11+']
 
 # Configure OpenAI
 openai.api_key = os.getenv('OPENAI_API_KEY')
+
+# SerpAPI no longer needed - using direct JustBookify links
 
 # Configure Shopify
 SHOPIFY_STORE_URL = os.getenv('SHOPIFY_STORE_URL')
@@ -49,19 +56,6 @@ FROM_EMAIL = os.getenv('FROM_EMAIL', 'your-verified-sender@yourdomain.com')
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
 TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
 TWILIO_WHATSAPP_NUMBER = os.getenv('TWILIO_WHATSAPP_NUMBER')
-
-def get_age_appropriate_prompt(age):
-    if age < 12:
-        return "You are a helpful children's book recommendation assistant. Recommend only age-appropriate books for young readers. Focus on educational and entertaining content."
-    elif age < 18:
-        return "You are a helpful young adult book recommendation assistant. Recommend age-appropriate books for teenagers, considering their maturity level."
-    else:
-        return "You are a helpful book recommendation assistant. Provide recommendations suitable for adult readers."
-
-# Helper function to convert ObjectId to string in book documents
-def format_book(book):
-    book['id'] = str(book.pop('_id'))
-    return book
 
 # Helper function to convert ObjectId to string in documents
 def format_document(doc):
@@ -489,7 +483,7 @@ def delete_user(user_id):
             'error': str(e)
         }), 500
 
-# Add book recommendation for user
+# Save recommendations for user
 @app.route('/users/<user_id>/recommendations', methods=['POST'])
 def add_recommendation(user_id):
     try:
@@ -555,58 +549,97 @@ def remove_recommendation(user_id, book_id):
 def generate_recommendation_plan():
     try:
         data = request.json
+        
+        # Check if this is a quiz user ID or direct data
+        user_id = data.get('userId')
+        if user_id and ObjectId.is_valid(user_id):
+            # Get data from quiz user collection
+            quiz_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
+            if quiz_user:
+                data = quiz_user
+        
         required_fields = ['name', 'age', 'selectedGenres', 'selectedInterests', 
                          'nonFictionInterests', 'bookSeries', 'parentEmail', 'parentPhone']
         
+        # Debug logging
+        print("Received data:", data)
+        
         # Validate required fields
         if not all(field in data for field in required_fields):
+            missing_fields = [field for field in required_fields if field not in data]
             return jsonify({
-                'error': 'Missing required fields'
+                'error': f'Missing required fields: {", ".join(missing_fields)}'
             }), 400
 
         age = data['age']
         selected_genres = data['selectedGenres']
         
-        # Flexible book query to ensure enough books
-        def get_flexible_books(age, selected_genres, min_books=15):
-            # 1. Try strict filter
-            books = list(books_collection.find({
-                'genres': {'$in': selected_genres},
-                'ageRange.min': {'$lte': age},
-                'ageRange.max': {'$gte': age}
-            }))
-            if len(books) >= min_books:
-                return books
-            # 2. Relax genre filter
-            books = list(books_collection.find({
-                'ageRange.min': {'$lte': age},
-                'ageRange.max': {'$gte': age}
-            }))
-            if len(books) >= min_books:
-                return books
-            # 3. Relax age filter
-            books = list(books_collection.find())
-            return books
-
-        potential_books = get_flexible_books(age, selected_genres, min_books=15)
-        print(potential_books)
-        # Initialize empty response structure
+        # Initialize empty reading plan structure
         empty_reading_plan = [
             {
                 'month': (datetime.now().replace(day=1) + timedelta(days=i*31)).strftime('%B'),
                 'books': []
             } for i in range(3)
         ]
+        
+        # Validate data types
+        if not isinstance(age, (int, float)) or age < 0:
+            return jsonify({
+                'error': 'Invalid age value'
+            }), 400
+            
+        if not isinstance(selected_genres, list) or not selected_genres:
+            return jsonify({
+                'error': 'Selected genres must be a non-empty list'
+            }), 400
 
+        # No longer using SerpAPI - creating direct JustBookify search links
+        
+        # Debug logging for database query
+        print(f"Querying books for age: {age}, genres: {selected_genres}")
+        
+        # Flexible book query to ensure enough books
+        def get_flexible_books(age, selected_genres, min_books=15):
+            # Debug logging
+            print("Starting flexible book search...")
+            
+            # 1. Try strict filter
+            books = list(books_collection.find({
+                'genres': {'$in': selected_genres},
+                'ageRange.min': {'$lte': age},
+                'ageRange.max': {'$gte': age}
+            }))
+            print(f"Strict filter found {len(books)} books")
+            
+            if len(books) >= min_books:
+                return books
+                
+            # 2. Relax genre filter
+            books = list(books_collection.find({
+                'ageRange.min': {'$lte': age},
+                'ageRange.max': {'$gte': age}
+            }))
+            print(f"Age filter only found {len(books)} books")
+            
+            if len(books) >= min_books:
+                return books
+                
+            # 3. Relax age filter
+            books = list(books_collection.find())
+            print(f"No filters found {len(books)} books")
+            return books
+
+        potential_books = get_flexible_books(age, selected_genres, min_books=15)
+        print(f"Total potential books found: {len(potential_books)}")
+        
         if not potential_books:
-            # Fallback: return empty, or you can return a default set of books here
-            fallback_books = []
-        else:
-            fallback_books = potential_books
-
-        # Prepare user interests and preferences
-        interests = data['selectedInterests'] + data['nonFictionInterests']
-        interests_str = ', '.join(interests)
+            print("No books found in database")
+            return jsonify({
+                'current': [],
+                'future': empty_reading_plan,
+                'recommendations': [],
+                'error': 'No books found in database'
+            })
 
         # Create a single context with all books, including description if available
         books_context = []
@@ -620,114 +653,189 @@ Description: {desc}
 Age Range: {book.get('ageRange', {}).get('min', 0)}-{book.get('ageRange', {}).get('max', 99)}
 ---"""
             books_context.append(book_info)
+        book_text = "\n".join(books_context)
+        
+        print("Preparing OpenAI request...")
+        
+        # Get recommendations from OpenAI with updated prompt
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": """You are an expert children's book recommendation system that carefully considers age appropriateness, reading preferences, and personal interests. Your recommendations should:
+1. Strictly match the reader's age range and interests
+2. Only include books that would be enjoyable based on the provided preferences
+3. Prioritize books that align with multiple interest areas
+4. Consider reading level appropriateness
+5. Exclude any books that don't match the specified genres or interests"""},
+                    {"role": "user", "content": f"""I need personalized book recommendations for a {age}-year-old reader with the following preferences:
 
-        # Create comprehensive prompt for OpenAI
-        system_prompt = f"""
-You are a children's book recommendation expert. You will receive a list of books (with title, author, genres, and description if available).
-If a description is missing, use your own knowledge of the book's content.
+GENRES THEY ENJOY: {', '.join(data['selectedGenres'])}
+SPECIFIC INTERESTS: {', '.join(data['selectedInterests'])}
+NON-FICTION INTERESTS: {', '.join(data['nonFictionInterests'])}
+BOOK SERIES PREFERENCE: They {'enjoy' if data['bookSeries'] else 'do not prefer'} book series.
 
-The user is:
-- Age: {age}
-- Interests: {interests_str}
-- Series Preference: {'Enjoys' if data['bookSeries'] else 'Does not prefer'} book series
+Available books in our inventory:
 
-Your task:
-1. You must select the 3 most suitable books for immediate reading (\"current recommendations\").
-2. You must select 4 books for each of the next 3 months (12 books total, can overlap with current recommendations if needed).
-3. For each book, provide:
-   - title
-   - author
-   - explanation (why it's a good fit)
-   - month (0 for current, 1-3 for future months)
+{book_text}
 
-Return your response in JSON:
-{{
-  "current": [{{"title": ..., "author": ..., "explanation": ...}}, ...],
-  "future": [
-    {{"month": 1, "books": [{{"title": ..., "author": ..., "explanation": ...}}, ...]}},
-    {{"month": 2, "books": [...] }},
-    {{"month": 3, "books": [...] }}
-  ]
-}}
-"""
+📚 Please recommend **25 books** that PERFECTLY match these preferences. Group them by author or series, with at least 10 different authors/series.
 
-        analysis_prompt = "\n".join(books_context)
+IMPORTANT GUIDELINES:
+- Only include books that strongly match the specified genres and interests
+- Ensure age appropriateness for a {age}-year-old reader
+- If they don't prefer series, prioritize standalone books
+- Focus on books that align with their specific interests
+- Consider both fiction and non-fiction based on their preferences
+- Exclude any books that don't match their interests or reading level
 
-        # Get recommendations from OpenAI
-        response = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": analysis_prompt}
-            ]
-        )
+✅ Return recommendations as a JSON array with this structure:
+[
+  {{
+    "name": "Series/Author Name",
+    "likely_score": X,  // Score 1-10 based on match with preferences
+    "books": [
+      "Book Title 1",
+      "Book Title 2"
+    ],
+    "rationale": "Detailed explanation of why this matches their interests"
+  }}
+]
 
-        # Parse OpenAI response
+🎯 Sort recommendations by likelihood score (highest to lowest), only including books with a score of 7 or higher.
+"""}
+                ],
+                temperature=0.7,
+                max_tokens=2000
+            )
+            
+            print("OpenAI response received")
+            print("Response content:", response.choices[0].message.content)
+            
+        except Exception as e:
+            print(f"OpenAI API error: {str(e)}")
+            return jsonify({
+                'current': [],
+                'future': empty_reading_plan,
+                'recommendations': [],
+                'error': f'OpenAI API error: {str(e)}'
+            })
+
+        # Parse OpenAI response and get series/author names
         try:
             raw_content = response.choices[0].message.content
-            print("OpenAI raw response:", raw_content)  # Log for debugging
+            print("Parsing OpenAI response...")
+            
+            # Parse JSON response
+            recommendations_json = json.loads(raw_content)
+            recommendations = []
+            
+            for rec in recommendations_json:
+                series_name = rec.get('name', '')
+                confidence_score = rec.get('likely_score', 8)
+                rationale = rec.get('rationale', '')
+                sample_books = [{"title": title, "author": series_name} for title in rec.get('books', [])]
+                
+                if series_name and sample_books:
+                    # Create direct JustBookify search link - clean up the series name
+                    clean_name = series_name.lower()
+                    # Remove various forms of "series" from the name
+                    clean_name = clean_name.replace(" series name", "")
+                    clean_name = clean_name.replace("series name", "")
+                    clean_name = clean_name.replace(" series", "")
+                    clean_name = clean_name.replace("series", "")
+                    # Remove any extra whitespace and trim
+                    clean_name = " ".join(clean_name.split()).strip()
+                    # If name is empty after cleaning, use original name
+                    if not clean_name:
+                        clean_name = series_name.lower().strip()
+                    search_term = urllib.parse.quote(clean_name)
+                    justbookify_link = f"https://www.justbookify.com/search?q={search_term}&options%5Bprefix%5D=last"
+                    
+                    recommendations.append({
+                        "name": series_name,
+                        "justbookify_link": justbookify_link,
+                        "rationale": rationale,
+                        "confidence_score": confidence_score,
+                        "sample_books": sample_books
+                    })
+                    print(f"Added recommendation for {series_name} with {len(sample_books)} books and link {justbookify_link}")
 
-            # Try to extract JSON if wrapped in code block
-            match = re.search(r"\{.*\}", raw_content, re.DOTALL)
-            json_str = match.group(0) if match else raw_content
+            # Sort recommendations by confidence score
+            recommendations.sort(key=lambda x: x['confidence_score'], reverse=True)
+            print(f"Total recommendations: {len(recommendations)}")
 
-            analysis = json.loads(json_str)
-            current_recs = analysis.get('current', [])
-            future_recs = analysis.get('future', [])
+            # Create current month recommendations
+            current_recs = []
+            if recommendations:
+                for rec in recommendations[:3]:  # Take top 3 recommendations
+                    for book in rec['sample_books'][:1]:  # Take first book from each recommendation
+                        current_recs.append({
+                            'title': book['title'],
+                            'author': rec['name'],
+                            'explanation': rec['rationale']
+                        })
 
-            if not current_recs:
-                # Fallback: select top related books
-                current_recs = [
-                    {
-                        'title': book['title'],
-                        'author': book['author'],
-                        'explanation': 'Selected as a top related book based on your preferences.'
-                    }
-                    for book in fallback_books[:3]
-                ]
+            # Create future months recommendations
+            future_recs = []
+            remaining_recs = recommendations[3:] if len(recommendations) > 3 else []
+            
+            for i in range(3):
+                month_books = []
+                month_start = i * 2
+                month_end = month_start + 2
+                
+                for rec in remaining_recs[month_start:month_end]:
+                    for book in rec['sample_books'][:1]:
+                        month_books.append({
+                            'title': book['title'],
+                            'author': rec['name'],
+                            'explanation': rec['rationale']
+                        })
+                
+                future_recs.append({
+                    'month': (datetime.now().replace(day=1) + timedelta(days=i*31)).strftime('%B'),
+                    'books': month_books
+                })
 
-            if not future_recs:
-                # Fallback: select top related books
-                future_recs = [
-                    {
-                        'month': (datetime.now().replace(day=1) + timedelta(days=i*31)).strftime('%B'),
-                        'books': [
-                            {
-                                'title': book['title'],
-                                'author': book['author'],
-                                'explanation': 'Selected as a top related book based on your preferences.'
-                            }
-                            for book in fallback_books[3 + i*4 : 3 + (i+1)*4]
-                        ]
-                    }
-                    for i in range(3)
-                ]
-
+            print("Returning results...")
+            print(f"Current recommendations: {len(current_recs)}")
+            print(f"Future months: {len(future_recs)}")
+            
             return jsonify({
                 'current': current_recs,
-                'future': future_recs
+                'future': future_recs,
+                'recommendations': recommendations
             })
 
         except json.JSONDecodeError as e:
-            print(f"Error parsing OpenAI response: {str(e)}")
-            print("Raw response was:", raw_content)
-            # Return empty results instead of error
+            print(f"JSON parsing error: {str(e)}")
             return jsonify({
                 'current': [],
-                'future': empty_reading_plan
+                'future': empty_reading_plan,
+                'recommendations': [],
+                'error': f'JSON parsing error: {str(e)}'
+            })
+        except Exception as e:
+            print(f"Error processing recommendations: {str(e)}")
+            import traceback
+            print("Traceback:", traceback.format_exc())
+            return jsonify({
+                'current': [],
+                'future': empty_reading_plan,
+                'recommendations': [],
+                'error': f'Error processing recommendations: {str(e)}'
             })
 
     except Exception as e:
         print(f"Error in generate_recommendation_plan: {str(e)}")
-        # Return empty results instead of error
+        import traceback
+        print("Traceback:", traceback.format_exc())
         return jsonify({
             'current': [],
-            'future': [
-                {
-                    'month': (datetime.now().replace(day=1) + timedelta(days=i*31)).strftime('%B'),
-                    'books': []
-                } for i in range(3)
-            ]
+            'future': empty_reading_plan,
+            'recommendations': [],
+            'error': f'Error in generate_recommendation_plan: {str(e)}'
         })
 
 # Send recommendations via email
@@ -747,17 +855,28 @@ def send_email_recommendations():
         <h2>Hello {data['name']}'s Parent!</h2>
         <p>Here are the book recommendations for {data['name']}:</p>
         
-        <h3>Recommended Books:</h3>
+        <h3>Current Recommendations:</h3>
         <ul>
-        {''.join(f'<li><strong>{book["title"]}</strong> by {book["author"]}</li>' for book in data['recommendations'])}
+        {''.join(f'<li><strong>{book["title"]}</strong> by {book["author"]}<br/><em>{book.get("explanation", "")}</em></li>' for book in data['recommendations'])}
         </ul>
+
+        <h3>Recommended Series and Authors:</h3>
+        {''.join(f'''
+        <div style="margin-bottom: 20px;">
+            <h4><a href="{rec['justbookify_link']}" target="_blank">{rec['name']}</a> (Confidence Score: {rec.get('confidence_score', 'N/A')}/10)</h4>
+            <p><em>{rec.get('rationale', '')}</em></p>
+            <ul>
+            {''.join(f'<li><strong>{book["title"]}</strong> by {book["author"]}</li>' for book in rec.get('sample_books', []))}
+            </ul>
+        </div>
+        ''' for rec in data.get('seriesRecommendations', []))}
 
         <h3>3-Month Reading Plan:</h3>
         {''.join(f'''
         <div style="margin-bottom: 20px;">
             <h4>{month['month']}</h4>
             <ul>
-            {''.join(f'<li>{book}</li>' for book in month['books'])}
+            {''.join(f'<li><strong>{book["title"]}</strong> by {book["author"]}<br/><em>{book.get("explanation", "")}</em></li>' for book in month['books'])}
             </ul>
         </div>
         ''' for month in data['readingPlan'])}
@@ -796,80 +915,986 @@ def send_email_recommendations():
 def send_whatsapp_recommendations():
     try:
         data = request.json
-        required_fields = ['phone', 'recommendations', 'readingPlan', 'name']
+        required_fields = ['phone', 'name', 'recommendations', 'current', 'future']
         
         if not all(field in data for field in required_fields):
             return jsonify({
                 'error': 'Missing required fields'
             }), 400
 
-        # Helper to format phone number (basic, expects E.164 or adds '+')
+        # Helper to format phone number for WhatsApp
         def format_phone_number(phone):
             phone = str(phone).strip()
+            import re
+            phone = re.sub(r'[^\d+]', '', phone)
+            
             if phone.startswith('+'):
                 return phone
-            # Add your country code logic here if needed
-            return '+' + phone
+            elif phone.startswith('1') and len(phone) == 11:
+                return '+' + phone
+            elif len(phone) == 10:
+                return '+1' + phone
+            else:
+                return '+' + phone
 
-        # Helper to format book entry
-        def format_book_entry(book):
-            if isinstance(book, dict):
-                title = book.get('title', 'Unknown Title')
-                author = book.get('author', 'Unknown Author')
-                return f"{title} by {author}"
-            return str(book)
-
-        # Format the message
-        message_body = f"Hello! Here are the book recommendations for {data['name']}:\n\n"
-        message_body += "📚 Recommended Books:\n"
-        for book in data['recommendations']:
-            message_body += f"• {format_book_entry(book)}\n"
+        # Initialize message parts for different sections
+        messages = []
         
-        message_body += "\n📅 3-Month Reading Plan:\n"
-        for month in data['readingPlan']:
-            month_name = month.get('month', 'Month')
-            message_body += f"\n{month_name}:\n"
-            for book in month.get('books', []):
-                message_body += f"• {format_book_entry(book)}\n"
+        # Header message
+        header = f"📚 Book Recommendations for {data['name']} 📚\n"
+        current_message = header
+
+        # Current Top Picks
+        if data.get('current'):
+            picks_message = "⭐ TOP PICKS FOR YOU ⭐\n"
+            for book in data['current']:
+                book_text = f"• {book['title']}"
+                if book.get('series'):
+                    book_text += f" ({book['series']} Series)"
+                book_text += f" by {book['author']}\n"
+                if book.get('explanation'):
+                    book_text += f"  Why: {book['explanation'][:100]}...\n"  # Truncate long explanations
+                picks_message += book_text + "\n"
+            
+            # Check if adding picks would exceed limit
+            if len(current_message + picks_message) > 1500:  # Buffer of 100 chars
+                messages.append(current_message)
+                current_message = header + picks_message
+            else:
+                current_message += picks_message
+
+        # Series & Authors Recommendations (Split into multiple messages)
+        if data.get('recommendations'):
+            series_header = "📖 RECOMMENDED SERIES & AUTHORS 📖\n"
+            current_series_message = series_header
+            
+            for rec in data['recommendations']:
+                series_text = f"\n{rec['name']} (Score: {rec.get('confidence_score', 'N/A')}/10)\n"
+                if rec.get('rationale'):
+                    series_text += f"Why: {rec['rationale'][:100]}...\n"  # Truncate long rationales
+                
+                # Add up to 2 sample books
+                if rec.get('sample_books'):
+                    series_text += "Featured Books:\n"
+                    for book in rec['sample_books'][:2]:
+                        book_text = f"• {book['title']}"
+                        if book.get('series'):
+                            book_text += f" ({book['series']} Series)"
+                        book_text += f" by {book['author']}\n"
+                        series_text += book_text
+                
+                series_text += f"🔍 View More: {rec['justbookify_link']}\n"
+
+                # Check if adding this series would exceed limit
+                if len(current_series_message + series_text) > 1500:
+                    messages.append(current_series_message)
+                    current_series_message = header + series_header + series_text
+                else:
+                    current_series_message += series_text
+
+            if current_series_message != series_header:
+                messages.append(current_series_message)
+
+        # Reading Plan (Split by month)
+        if data.get('future'):
+            for month in data['future']:
+                month_message = f"📅 {month['month'].upper()} READING PLAN 📅\n"
+                if month.get('books'):
+                    for book in month['books']:
+                        book_text = f"• {book['title']}"
+                        if book.get('series'):
+                            book_text += f" ({book['series']} Series)"
+                        book_text += f" by {book['author']}\n"
+                        month_message += book_text
+                else:
+                    month_message += "More recommendations coming soon!\n"
+                
+                messages.append(header + month_message + "\n")
+
+        # Add footer to last message
+        if messages:
+            messages[-1] += "\n📚 Happy Reading! 📚"
         
-        message_body += "\nHappy Reading! 📖"
-
-        # WhatsApp message length limit (Twilio: 4096 chars)
-        MAX_LENGTH = 4096
-        if len(message_body) > MAX_LENGTH:
-            message_body = message_body[:MAX_LENGTH-20] + '\n...[truncated]'
-
-        # Initialize Twilio client (renamed to twilio_client)
+        # Initialize Twilio client
         twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
         # Format phone number
-        to_phone = format_phone_number(data['phone'])
+        to_phone = format_phone_number('+380986750527')
+        # to_phone = format_phone_number(data['phone'])
 
-        # Send WhatsApp message
-        try:
-            message = twilio_client.messages.create(
-                body=message_body,
-                from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
-                to=f"whatsapp:{to_phone}"
-            )
-        except Exception as twilio_error:
+        # Validate Twilio configuration
+        if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_WHATSAPP_NUMBER:
             return jsonify({
-                'error': f'Failed to send WhatsApp message: {str(twilio_error)}'
+                'error': 'WhatsApp service not configured. Missing Twilio credentials.'
             }), 500
 
-        if hasattr(message, 'sid') and message.sid:
+        # Send messages with delay between each
+        message_sids = []
+        try:
+            for msg in messages:
+                # Ensure message doesn't exceed limit
+                if len(msg) > 1600:
+                    msg = msg[:1550] + "...\n(Message truncated)"
+                
+                message = twilio_client.messages.create(
+                    body=msg,
+                    from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
+                    to=f"whatsapp:{to_phone}"
+                )
+                message_sids.append(message.sid)
+                time.sleep(1)  # Add delay between messages to prevent rate limiting
+                
             return jsonify({
-                'message': 'Recommendations sent successfully to WhatsApp'
+                'message': f'Successfully sent {len(message_sids)} messages',
+                'message_sids': message_sids
             })
-        else:
+        except Exception as twilio_error:
+            print(f"Twilio error: {str(twilio_error)}")
             return jsonify({
-                'error': 'Failed to send WhatsApp message (no SID returned)'
+                'error': f'Failed to send WhatsApp message: {str(twilio_error)}'
             }), 500
 
     except Exception as e:
         return jsonify({
             'error': str(e)
         }), 500
+
+# Helper function to process reader types
+def process_reader_types(types_str):
+    if not types_str or pd.isna(types_str):
+        return []
+    types = [t.strip() for t in str(types_str).split(';')]
+    age_ranges = {
+        'early-readers': {'min': 3, 'max': 5},
+        'emerging-readers': {'min': 6, 'max': 8},
+        'junior-readers': {'min': 9, 'max': 10},
+        'preteen-readers': {'min': 11, 'max': 12},
+        'teen-readers': {'min': 13, 'max': 18},
+    }
+    
+    min_age = float('inf')
+    max_age = 0
+    for reader_type in types:
+        if reader_type in age_ranges:
+            range_info = age_ranges[reader_type]
+            min_age = min(min_age, range_info['min'])
+            max_age = max(max_age, range_info['max'])
+    
+    # If no valid reader types found, use default range
+    if min_age == float('inf'):
+        return {'min': 4, 'max': 14}
+    
+    return {'min': min_age, 'max': max_age}
+
+# Helper function to process genres
+def process_genres(genres_str):
+    if not genres_str or pd.isna(genres_str):
+        return []
+    return [genre.strip() for genre in str(genres_str).split(';')]
+
+# Import books from CSV
+@app.route('/import-books', methods=['POST'])
+def import_books():
+    try:
+        if 'file' not in request.files:
+            return jsonify({
+                'error': 'No file uploaded'
+            }), 400
+            
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({
+                'error': 'No file selected'
+            }), 400
+            
+        # Check file extension
+        if not file.filename.endswith('.csv'):
+            return jsonify({
+                'error': 'Invalid file format. Please upload a CSV file.'
+            }), 400
+            
+        # Read CSV file
+        try:
+            df = pd.read_csv(file)
+        except Exception as e:
+            return jsonify({
+                'error': f'Error reading CSV file: {str(e)}'
+            }), 400
+            
+        # Check required columns
+        required_columns = ['Title', 'Vendor', 'Type', 'Tags', 'Image Src', 'Genre (product.metafields.shopify.genre)']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            return jsonify({
+                'error': f'Missing required columns: {", ".join(missing_columns)}'
+            }), 400
+            
+        # Process and insert books
+        success_count = 0
+        error_count = 0
+        errors = []
+        
+        for index, row in df.iterrows():
+            try:
+                # Process book data
+                book_data = {
+                    'title': row['Title'] if not pd.isna(row['Title']) else '',
+                    'author': row['Vendor'] if not pd.isna(row['Vendor']) else 'Unknown',
+                    'ageRange': process_reader_types(row['Type']),
+                    'tags': process_genres(row['Tags']),
+                    'image': row['Image Src'] if not pd.isna(row['Image Src']) else None,
+                    'genres': process_genres(row['Genre (product.metafields.shopify.genre)']),
+                    'importedAt': datetime.utcnow()
+                }
+                
+                # Skip if title is empty
+                if not book_data['title']:
+                    error_count += 1
+                    errors.append(f'Row {index + 2}: Empty title')
+                    continue
+                
+                # Check if book already exists
+                existing_book = books_collection.find_one({
+                    'title': book_data['title'],
+                    'author': book_data['author']
+                })
+                
+                if existing_book:
+                    # Update existing book
+                    books_collection.update_one(
+                        {'_id': existing_book['_id']},
+                        {'$set': book_data}
+                    )
+                else:
+                    # Insert new book
+                    books_collection.insert_one(book_data)
+                
+                success_count += 1
+                
+            except Exception as e:
+                error_count += 1
+                errors.append(f'Row {index + 2}: {str(e)}')
+                
+        return jsonify({
+            'message': 'Import completed',
+            'success_count': success_count,
+            'error_count': error_count,
+            'errors': errors[:100]  # Limit number of errors in response
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'error': str(e)
+        }), 500
+
+# ==================== QUIZ API ENDPOINTS ====================
+
+# Save parent consent and create initial user
+@app.route('/quiz/parent-consent', methods=['POST'])
+def save_parent_consent():
+    try:
+        data = request.json
+        email = data.get('email')
+        phone = data.get('phone')
+        timestamp = data.get('timestamp')
+        
+        if not all([email, phone]):
+            return jsonify({
+                'success': False,
+                'error': 'Email and phone are required'
+            }), 400
+            
+        # Create initial quiz user record
+        user_data = {
+            'parentEmail': email,
+            'parentPhone': phone,
+            'consentTimestamp': timestamp or datetime.utcnow().isoformat(),
+            'createdAt': datetime.utcnow(),
+            'status': 'consent_given',
+            'quizProgress': {
+                'parentConsent': True,
+                'basicInfo': False,
+                'parentReading': False,
+                'genres': False,
+                'interests': False,
+                'bookSeries': False,
+                'completed': False
+            }
+        }
+        
+        result = quiz_users_collection.insert_one(user_data)
+        
+        return jsonify({
+            'success': True,
+            'userId': str(result.inserted_id),
+            'message': 'Parent consent saved and user created successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Update user basic info
+@app.route('/quiz/users/<user_id>/basic-info', methods=['PUT'])
+def update_user_basic_info(user_id):
+    try:
+        data = request.json
+        name = data.get('name')
+        age = data.get('age')
+        
+        if not all([name, age]):
+            return jsonify({
+                'success': False,
+                'error': 'Name and age are required'
+            }), 400
+            
+        if not ObjectId.is_valid(user_id):
+            return jsonify({'error': 'Invalid user ID'}), 400
+            
+        # Update user with basic info
+        update_data = {
+            'name': name,
+            'age': age,
+            'updatedAt': datetime.utcnow(),
+            'quizProgress.basicInfo': True
+        }
+        
+        result = quiz_users_collection.update_one(
+            {'_id': ObjectId(user_id)},
+            {'$set': update_data}
+        )
+        
+        if result.modified_count == 0:
+            return jsonify({'error': 'User not found'}), 404
+            
+        # Get updated user
+        updated_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
+        return jsonify({
+            'success': True,
+            'user': format_document(updated_user)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Update parent reading habits
+@app.route('/quiz/users/<user_id>/parent-reading', methods=['PUT'])
+def update_parent_reading(user_id):
+    try:
+        data = request.json
+        parent_reading = data.get('parentReading')
+        
+        if not parent_reading:
+            return jsonify({
+                'success': False,
+                'error': 'Parent reading habits are required'
+            }), 400
+            
+        if not ObjectId.is_valid(user_id):
+            return jsonify({'error': 'Invalid user ID'}), 400
+            
+        # Update user with parent reading info
+        update_data = {
+            'parentReading': parent_reading,
+            'updatedAt': datetime.utcnow(),
+            'quizProgress.parentReading': True
+        }
+        
+        result = quiz_users_collection.update_one(
+            {'_id': ObjectId(user_id)},
+            {'$set': update_data}
+        )
+        
+        if result.modified_count == 0:
+            return jsonify({'error': 'User not found'}), 404
+            
+        # Get updated user
+        updated_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
+        return jsonify({
+            'success': True,
+            'user': format_document(updated_user)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Update genre preferences
+@app.route('/quiz/users/<user_id>/genres', methods=['PUT'])
+def update_genre_preferences(user_id):
+    try:
+        data = request.json
+        
+        if not ObjectId.is_valid(user_id):
+            return jsonify({'error': 'Invalid user ID'}), 400
+            
+        # Prepare update data
+        update_data = {
+            'updatedAt': datetime.utcnow(),
+            'quizProgress.genres': True
+        }
+        
+        # Add genre-related fields if provided
+        genre_fields = [
+            'selectedGenres', 'topThreeGenres', 'fictionGenres', 
+            'nonFictionGenres', 'additionalGenres', 'fictionNonFictionRatio'
+        ]
+        
+        for field in genre_fields:
+            if field in data:
+                update_data[field] = data[field]
+        
+        result = quiz_users_collection.update_one(
+            {'_id': ObjectId(user_id)},
+            {'$set': update_data}
+        )
+        
+        if result.modified_count == 0:
+            return jsonify({'error': 'User not found'}), 404
+            
+        # Get updated user
+        updated_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
+        return jsonify({
+            'success': True,
+            'user': format_document(updated_user)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Update interests
+@app.route('/quiz/users/<user_id>/interests', methods=['PUT'])
+def update_interests(user_id):
+    try:
+        data = request.json
+        selected_interests = data.get('selectedInterests', [])
+        non_fiction_interests = data.get('nonFictionInterests', [])
+        
+        if not ObjectId.is_valid(user_id):
+            return jsonify({'error': 'Invalid user ID'}), 400
+            
+        # Update user with interests
+        update_data = {
+            'selectedInterests': selected_interests,
+            'nonFictionInterests': non_fiction_interests,
+            'updatedAt': datetime.utcnow(),
+            'quizProgress.interests': True
+        }
+        
+        result = quiz_users_collection.update_one(
+            {'_id': ObjectId(user_id)},
+            {'$set': update_data}
+        )
+        
+        if result.modified_count == 0:
+            return jsonify({'error': 'User not found'}), 404
+            
+        # Get updated user
+        updated_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
+        return jsonify({
+            'success': True,
+            'user': format_document(updated_user)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Update book series responses
+@app.route('/quiz/users/<user_id>/book-series', methods=['PUT'])
+def update_book_series_responses(user_id):
+    try:
+        data = request.json
+        book_series = data.get('bookSeries', [])
+        
+        if not ObjectId.is_valid(user_id):
+            return jsonify({'error': 'Invalid user ID'}), 400
+            
+        # Update user with book series responses
+        update_data = {
+            'bookSeries': book_series,
+            'updatedAt': datetime.utcnow(),
+            'quizProgress.bookSeries': True
+        }
+        
+        result = quiz_users_collection.update_one(
+            {'_id': ObjectId(user_id)},
+            {'$set': update_data}
+        )
+        
+        if result.modified_count == 0:
+            return jsonify({'error': 'User not found'}), 404
+            
+        # Get updated user
+        updated_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
+        return jsonify({
+            'success': True,
+            'user': format_document(updated_user)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Save individual book series response
+@app.route('/quiz/users/<user_id>/book-series/response', methods=['POST'])
+def save_book_series_response(user_id):
+    try:
+        data = request.json
+        series_id = data.get('seriesId')
+        has_read = data.get('hasRead')
+        response_value = data.get('response')
+        timestamp = data.get('timestamp')
+        
+        if not ObjectId.is_valid(user_id):
+            return jsonify({'error': 'Invalid user ID'}), 400
+            
+        if series_id is None or has_read is None:
+            return jsonify({
+                'error': 'Series ID and hasRead are required'
+            }), 400
+            
+        # Create response record
+        response_data = {
+            'userId': user_id,
+            'seriesId': series_id,
+            'hasRead': has_read,
+            'response': response_value,
+            'timestamp': timestamp or datetime.utcnow().isoformat(),
+            'createdAt': datetime.utcnow()
+        }
+        
+        # Save individual response
+        quiz_responses_collection.insert_one(response_data)
+        
+        # Update user's book series array
+        user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+            
+        book_series = user.get('bookSeries', [])
+        
+        # Update or add the response
+        found = False
+        for i, series in enumerate(book_series):
+            if series.get('seriesId') == series_id:
+                book_series[i] = {
+                    'seriesId': series_id,
+                    'hasRead': has_read,
+                    'response': response_value
+                }
+                found = True
+                break
+        
+        if not found:
+            book_series.append({
+                'seriesId': series_id,
+                'hasRead': has_read,
+                'response': response_value
+            })
+        
+        # Update user
+        quiz_users_collection.update_one(
+            {'_id': ObjectId(user_id)},
+            {'$set': {
+                'bookSeries': book_series,
+                'updatedAt': datetime.utcnow()
+            }}
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': 'Book series response saved successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Complete quiz
+@app.route('/quiz/complete', methods=['POST'])
+def complete_quiz():
+    try:
+        data = request.json
+        user_id = data.get('userId')
+        
+        if not user_id or not ObjectId.is_valid(user_id):
+            return jsonify({
+                'success': False,
+                'error': 'Valid user ID is required'
+            }), 400
+            
+        # Update user with all final data and mark as completed
+        update_data = {
+            'updatedAt': datetime.utcnow(),
+            'completedAt': data.get('completedAt', datetime.utcnow().isoformat()),
+            'quizProgress.completed': True,
+            'status': 'completed'
+        }
+        
+        # Add all quiz data fields
+        quiz_fields = [
+            'name', 'age', 'parentEmail', 'parentPhone', 'parentReading',
+            'selectedGenres', 'selectedInterests', 'nonFictionInterests',
+            'topThreeGenres', 'fictionGenres', 'nonFictionGenres',
+            'additionalGenres', 'fictionNonFictionRatio', 'bookSeries'
+        ]
+        
+        for field in quiz_fields:
+            if field in data:
+                update_data[field] = data[field]
+        
+        result = quiz_users_collection.update_one(
+            {'_id': ObjectId(user_id)},
+            {'$set': update_data}
+        )
+        
+        if result.modified_count == 0:
+            return jsonify({
+                'success': False,
+                'error': 'User not found'
+            }), 404
+            
+        # Get completed user data
+        completed_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
+        
+        return jsonify({
+            'success': True,
+            'message': 'Quiz completed successfully',
+            'user': format_document(completed_user)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Update user data incrementally
+@app.route('/quiz/users/<user_id>', methods=['PUT'])
+def update_quiz_user_data(user_id):
+    try:
+        data = request.json
+        
+        if not ObjectId.is_valid(user_id):
+            return jsonify({'error': 'Invalid user ID'}), 400
+            
+        # Remove userId from data if present
+        data.pop('userId', None)
+        
+        # Add update timestamp
+        data['updatedAt'] = datetime.utcnow()
+        
+        result = quiz_users_collection.update_one(
+            {'_id': ObjectId(user_id)},
+            {'$set': data}
+        )
+        
+        if result.modified_count == 0:
+            return jsonify({'error': 'User not found'}), 404
+            
+        # Get updated user
+        updated_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
+        return jsonify({
+            'success': True,
+            'user': format_document(updated_user)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Get user data
+@app.route('/quiz/users/<user_id>', methods=['GET'])
+def get_quiz_user_data(user_id):
+    try:
+        if not ObjectId.is_valid(user_id):
+            return jsonify({'error': 'Invalid user ID'}), 400
+            
+        user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+            
+        return jsonify({
+            'success': True,
+            'user': format_document(user)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Save recommendations for quiz user
+@app.route('/quiz/users/<user_id>/recommendations', methods=['POST'])
+def save_quiz_user_recommendations(user_id):
+    try:
+        data = request.json
+        recommendations = data.get('recommendations')
+        
+        if not recommendations:
+            return jsonify({
+                'success': False,
+                'error': 'Recommendations are required'
+            }), 400
+            
+        if not ObjectId.is_valid(user_id):
+            return jsonify({'error': 'Invalid user ID'}), 400
+            
+        # Update user with recommendations
+        update_data = {
+            'recommendations': recommendations,
+            'recommendationsGeneratedAt': data.get('generatedAt', datetime.utcnow().isoformat()),
+            'updatedAt': datetime.utcnow()
+        }
+        
+        result = quiz_users_collection.update_one(
+            {'_id': ObjectId(user_id)},
+            {'$set': update_data}
+        )
+        
+        if result.modified_count == 0:
+            return jsonify({'error': 'User not found'}), 404
+            
+        return jsonify({
+            'success': True,
+            'message': 'Recommendations saved successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Get all quiz users (for admin purposes)
+@app.route('/quiz/users', methods=['GET'])
+def get_all_quiz_users():
+    try:
+        users = list(quiz_users_collection.find())
+        formatted_users = [format_document(user) for user in users]
+        return jsonify({
+            'success': True,
+            'users': formatted_users
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Get quiz responses (for analytics)
+@app.route('/quiz/responses', methods=['GET'])
+def get_quiz_responses():
+    try:
+        responses = list(quiz_responses_collection.find())
+        formatted_responses = [format_document(response) for response in responses]
+        return jsonify({
+            'success': True,
+            'responses': formatted_responses
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Generate recommendations for quiz user
+@app.route('/quiz/users/<user_id>/generate-recommendations', methods=['POST'])
+def generate_quiz_user_recommendations(user_id):
+    try:
+        if not ObjectId.is_valid(user_id):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid user ID'
+            }), 400
+            
+        # Get quiz user data
+        quiz_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
+        if not quiz_user:
+            return jsonify({
+                'success': False,
+                'error': 'Quiz user not found'
+            }), 404
+            
+        # Check if user has completed the quiz
+        if not quiz_user.get('quizProgress', {}).get('completed', False):
+            return jsonify({
+                'success': False,
+                'error': 'Quiz not completed yet'
+            }), 400
+            
+        # Prepare data for recommendation generation
+        recommendation_data = {
+            'userId': user_id,
+            'name': quiz_user.get('name'),
+            'age': quiz_user.get('age'),
+            'selectedGenres': quiz_user.get('selectedGenres', []),
+            'selectedInterests': quiz_user.get('selectedInterests', []),
+            'nonFictionInterests': quiz_user.get('nonFictionInterests', []),
+            'bookSeries': quiz_user.get('bookSeries', []),
+            'parentEmail': quiz_user.get('parentEmail'),
+            'parentPhone': quiz_user.get('parentPhone')
+        }
+        
+        # Use the existing recommendation generation logic
+        # This calls the same logic as the /recommendation-plan endpoint
+        from flask import current_app
+        with current_app.test_request_context('/recommendation-plan', method='POST', json=recommendation_data):
+            recommendations_response = generate_recommendation_plan()
+            
+        # If recommendations were generated successfully, save them to the user
+        if hasattr(recommendations_response, 'get_json'):
+            recommendations_data = recommendations_response.get_json()
+            if recommendations_data and not recommendations_data.get('error'):
+                # Save recommendations to quiz user
+                quiz_users_collection.update_one(
+                    {'_id': ObjectId(user_id)},
+                    {'$set': {
+                        'generatedRecommendations': recommendations_data,
+                        'recommendationsGeneratedAt': datetime.utcnow().isoformat(),
+                        'updatedAt': datetime.utcnow()
+                    }}
+                )
+                
+                return jsonify({
+                    'success': True,
+                    'recommendations': recommendations_data,
+                    'message': 'Recommendations generated and saved successfully'
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': recommendations_data.get('error', 'Failed to generate recommendations')
+                }), 500
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to generate recommendations'
+            }), 500
+            
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Send quiz user recommendations via email
+@app.route('/quiz/users/<user_id>/send-recommendations/email', methods=['POST'])
+def send_quiz_user_email_recommendations(user_id):
+    try:
+        if not ObjectId.is_valid(user_id):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid user ID'
+            }), 400
+            
+        # Get quiz user data
+        quiz_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
+        if not quiz_user:
+            return jsonify({
+                'success': False,
+                'error': 'Quiz user not found'
+            }), 404
+            
+        # Check if recommendations exist
+        recommendations_data = quiz_user.get('generatedRecommendations')
+        if not recommendations_data:
+            return jsonify({
+                'success': False,
+                'error': 'No recommendations found. Please generate recommendations first.'
+            }), 400
+            
+        # Prepare data for email sending (using existing email endpoint format)
+        email_data = {
+            'email': quiz_user.get('parentEmail'),
+            'name': quiz_user.get('name'),
+            'recommendations': recommendations_data.get('current', []),
+            'readingPlan': recommendations_data.get('future', []),
+            'seriesRecommendations': recommendations_data.get('recommendations', [])
+        }
+        
+        # Use existing email sending logic
+        from flask import current_app
+        with current_app.test_request_context('/send-recommendations/email', method='POST', json=email_data):
+            email_response = send_email_recommendations()
+            
+        return email_response
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Send quiz user recommendations via WhatsApp
+@app.route('/quiz/users/<user_id>/send-recommendations/whatsapp', methods=['POST'])
+def send_quiz_user_whatsapp_recommendations(user_id):
+    try:
+        if not ObjectId.is_valid(user_id):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid user ID'
+            }), 400
+            
+        # Get quiz user data
+        quiz_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
+        if not quiz_user:
+            return jsonify({
+                'success': False,
+                'error': 'Quiz user not found'
+            }), 404
+            
+        # Check if recommendations exist
+        recommendations_data = quiz_user.get('generatedRecommendations')
+        if not recommendations_data:
+            return jsonify({
+                'success': False,
+                'error': 'No recommendations found. Please generate recommendations first.'
+            }), 400
+            
+        # Prepare data for WhatsApp sending (using existing WhatsApp endpoint format)
+        whatsapp_data = {
+            'phone': quiz_user.get('parentPhone'),
+            'name': quiz_user.get('name'),
+            'recommendations': recommendations_data.get('recommendations', []),
+            'current': recommendations_data.get('current', []),
+            'future': recommendations_data.get('future', [])
+        }
+        
+        # Use existing WhatsApp sending logic
+        from flask import current_app
+        with current_app.test_request_context('/send-recommendations/whatsapp', method='POST', json=whatsapp_data):
+            whatsapp_response = send_whatsapp_recommendations()
+            
+        return whatsapp_response
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# ==================== END QUIZ API ENDPOINTS ====================
 
 if __name__ == '__main__':
     app.run(debug=True)
