@@ -9,7 +9,7 @@ from flask_cors import CORS
 from bson import ObjectId
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail, Content
-from twilio.rest import Client
+
 import json
 import re
 import urllib.parse
@@ -52,10 +52,10 @@ SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
 SENDGRID_API_KEY = os.getenv('SENDGRID_API_KEY')
 FROM_EMAIL = os.getenv('FROM_EMAIL', 'your-verified-sender@yourdomain.com')
 
-# Configure Twilio
-TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
-TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
-TWILIO_WHATSAPP_NUMBER = os.getenv('TWILIO_WHATSAPP_NUMBER')
+# Configure Facebook WhatsApp API
+FACEBOOK_ACCESS_TOKEN = os.getenv('FACEBOOK_ACCESS_TOKEN')
+WHATSAPP_PHONE_NUMBER_ID = os.getenv('WHATSAPP_PHONE_NUMBER_ID')
+WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv('WHATSAPP_BUSINESS_ACCOUNT_ID')
 
 # Helper function to convert ObjectId to string in documents
 def format_document(doc):
@@ -910,10 +910,12 @@ def send_email_recommendations():
             'error': str(e)
         }), 500
 
-# Send recommendations via WhatsApp
+# Send recommendations via WhatsApp using Facebook Graph API
 @app.route('/send-recommendations/whatsapp', methods=['POST'])
 def send_whatsapp_recommendations():
     try:
+        from whatsapp_api import create_whatsapp_client, format_book_recommendations_messages
+        
         data = request.json
         required_fields = ['phone', 'name', 'recommendations', 'current', 'future']
         
@@ -922,139 +924,75 @@ def send_whatsapp_recommendations():
                 'error': 'Missing required fields'
             }), 400
 
-        # Helper to format phone number for WhatsApp
-        def format_phone_number(phone):
-            phone = str(phone).strip()
-            import re
-            phone = re.sub(r'[^\d+]', '', phone)
-            
-            if phone.startswith('+'):
-                return phone
-            elif phone.startswith('1') and len(phone) == 11:
-                return '+' + phone
-            elif len(phone) == 10:
-                return '+1' + phone
-            else:
-                return '+' + phone
-
-        # Initialize message parts for different sections
-        messages = []
-        
-        # Header message
-        header = f"📚 Book Recommendations for {data['name']} 📚\n"
-        current_message = header
-
-        # Current Top Picks
-        if data.get('current'):
-            picks_message = "⭐ TOP PICKS FOR YOU ⭐\n"
-            for book in data['current']:
-                book_text = f"• {book['title']}"
-                if book.get('series'):
-                    book_text += f" ({book['series']} Series)"
-                book_text += f" by {book['author']}\n"
-                if book.get('explanation'):
-                    book_text += f"  Why: {book['explanation'][:100]}...\n"  # Truncate long explanations
-                picks_message += book_text + "\n"
-            
-            # Check if adding picks would exceed limit
-            if len(current_message + picks_message) > 1500:  # Buffer of 100 chars
-                messages.append(current_message)
-                current_message = header + picks_message
-            else:
-                current_message += picks_message
-
-        # Series & Authors Recommendations (Split into multiple messages)
-        if data.get('recommendations'):
-            series_header = "📖 RECOMMENDED SERIES & AUTHORS 📖\n"
-            current_series_message = series_header
-            
-            for rec in data['recommendations']:
-                series_text = f"\n{rec['name']} (Score: {rec.get('confidence_score', 'N/A')}/10)\n"
-                if rec.get('rationale'):
-                    series_text += f"Why: {rec['rationale'][:100]}...\n"  # Truncate long rationales
-                
-                # Add up to 2 sample books
-                if rec.get('sample_books'):
-                    series_text += "Featured Books:\n"
-                    for book in rec['sample_books'][:2]:
-                        book_text = f"• {book['title']}"
-                        if book.get('series'):
-                            book_text += f" ({book['series']} Series)"
-                        book_text += f" by {book['author']}\n"
-                        series_text += book_text
-                
-                series_text += f"🔍 View More: {rec['justbookify_link']}\n"
-
-                # Check if adding this series would exceed limit
-                if len(current_series_message + series_text) > 1500:
-                    messages.append(current_series_message)
-                    current_series_message = header + series_header + series_text
-                else:
-                    current_series_message += series_text
-
-            if current_series_message != series_header:
-                messages.append(current_series_message)
-
-        # Reading Plan (Split by month)
-        if data.get('future'):
-            for month in data['future']:
-                month_message = f"📅 {month['month'].upper()} READING PLAN 📅\n"
-                if month.get('books'):
-                    for book in month['books']:
-                        book_text = f"• {book['title']}"
-                        if book.get('series'):
-                            book_text += f" ({book['series']} Series)"
-                        book_text += f" by {book['author']}\n"
-                        month_message += book_text
-                else:
-                    month_message += "More recommendations coming soon!\n"
-                
-                messages.append(header + month_message + "\n")
-
-        # Add footer to last message
-        if messages:
-            messages[-1] += "\n📚 Happy Reading! 📚"
-        
-        # Initialize Twilio client
-        twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-
-        # Format phone number
-        to_phone = format_phone_number('+380986750527')
-        # to_phone = format_phone_number(data['phone'])
-
-        # Validate Twilio configuration
-        if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_WHATSAPP_NUMBER:
+        # Create WhatsApp client
+        whatsapp_client = create_whatsapp_client()
+        if not whatsapp_client:
             return jsonify({
-                'error': 'WhatsApp service not configured. Missing Twilio credentials.'
+                'error': 'WhatsApp service not configured. Missing Facebook API credentials.'
             }), 500
 
-        # Send messages with delay between each
-        message_sids = []
-        try:
-            for msg in messages:
-                # Ensure message doesn't exceed limit
-                if len(msg) > 1600:
-                    msg = msg[:1550] + "...\n(Message truncated)"
-                
-                message = twilio_client.messages.create(
-                    body=msg,
-                    from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
-                    to=f"whatsapp:{to_phone}"
-                )
-                message_sids.append(message.sid)
-                time.sleep(1)  # Add delay between messages to prevent rate limiting
-                
+        # Format messages
+        messages = format_book_recommendations_messages(data)
+        
+        if not messages:
             return jsonify({
-                'message': f'Successfully sent {len(message_sids)} messages',
-                'message_sids': message_sids
+                'error': 'No messages to send'
+            }), 400
+
+        # Send messages
+        result = whatsapp_client.send_multiple_messages(data['phone'], messages)
+        
+        return jsonify({
+            'message': f"Successfully sent {result['successful_messages']} out of {result['total_messages']} messages",
+            **result
+        })
+
+    except Exception as e:
+        print(f"General error in WhatsApp sending: {str(e)}")
+        return jsonify({
+            'error': str(e)
+        }), 500
+
+# Test WhatsApp with hello_world template
+@app.route('/test-whatsapp', methods=['POST'])
+def test_whatsapp():
+    try:
+        from whatsapp_api import create_whatsapp_client
+        
+        data = request.json
+        phone = data.get('phone')
+        
+        if not phone:
+            return jsonify({
+                'error': 'Phone number is required'
+            }), 400
+
+        # Create WhatsApp client
+        whatsapp_client = create_whatsapp_client()
+        if not whatsapp_client:
+            return jsonify({
+                'error': 'WhatsApp service not configured. Missing Facebook API credentials.'
+            }), 500
+
+        # Format phone number and send hello_world template
+        formatted_phone = whatsapp_client.format_phone_number(phone)
+        response = whatsapp_client.send_template_message(formatted_phone, "hello_world")
+        
+        if response.status_code == 200:
+            response_data = response.json()
+            return jsonify({
+                'message': 'Hello world template sent successfully',
+                'recipient_phone': formatted_phone,
+                'response_data': response_data
             })
-        except Exception as twilio_error:
-            print(f"Twilio error: {str(twilio_error)}")
+        else:
             return jsonify({
-                'error': f'Failed to send WhatsApp message: {str(twilio_error)}'
+                'error': f'Failed to send message: {response.status_code} - {response.text}',
+                'recipient_phone': formatted_phone
             }), 500
 
     except Exception as e:
+        print(f"Error in test WhatsApp: {str(e)}")
         return jsonify({
             'error': str(e)
         }), 500
@@ -1701,199 +1639,6 @@ def get_all_quiz_users():
             'success': False,
             'error': str(e)
         }), 500
-
-# Get quiz responses (for analytics)
-@app.route('/quiz/responses', methods=['GET'])
-def get_quiz_responses():
-    try:
-        responses = list(quiz_responses_collection.find())
-        formatted_responses = [format_document(response) for response in responses]
-        return jsonify({
-            'success': True,
-            'responses': formatted_responses
-        })
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-# Generate recommendations for quiz user
-@app.route('/quiz/users/<user_id>/generate-recommendations', methods=['POST'])
-def generate_quiz_user_recommendations(user_id):
-    try:
-        if not ObjectId.is_valid(user_id):
-            return jsonify({
-                'success': False,
-                'error': 'Invalid user ID'
-            }), 400
-            
-        # Get quiz user data
-        quiz_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
-        if not quiz_user:
-            return jsonify({
-                'success': False,
-                'error': 'Quiz user not found'
-            }), 404
-            
-        # Check if user has completed the quiz
-        if not quiz_user.get('quizProgress', {}).get('completed', False):
-            return jsonify({
-                'success': False,
-                'error': 'Quiz not completed yet'
-            }), 400
-            
-        # Prepare data for recommendation generation
-        recommendation_data = {
-            'userId': user_id,
-            'name': quiz_user.get('name'),
-            'age': quiz_user.get('age'),
-            'selectedGenres': quiz_user.get('selectedGenres', []),
-            'selectedInterests': quiz_user.get('selectedInterests', []),
-            'nonFictionInterests': quiz_user.get('nonFictionInterests', []),
-            'bookSeries': quiz_user.get('bookSeries', []),
-            'parentEmail': quiz_user.get('parentEmail'),
-            'parentPhone': quiz_user.get('parentPhone')
-        }
-        
-        # Use the existing recommendation generation logic
-        # This calls the same logic as the /recommendation-plan endpoint
-        from flask import current_app
-        with current_app.test_request_context('/recommendation-plan', method='POST', json=recommendation_data):
-            recommendations_response = generate_recommendation_plan()
-            
-        # If recommendations were generated successfully, save them to the user
-        if hasattr(recommendations_response, 'get_json'):
-            recommendations_data = recommendations_response.get_json()
-            if recommendations_data and not recommendations_data.get('error'):
-                # Save recommendations to quiz user
-                quiz_users_collection.update_one(
-                    {'_id': ObjectId(user_id)},
-                    {'$set': {
-                        'generatedRecommendations': recommendations_data,
-                        'recommendationsGeneratedAt': datetime.utcnow().isoformat(),
-                        'updatedAt': datetime.utcnow()
-                    }}
-                )
-                
-                return jsonify({
-                    'success': True,
-                    'recommendations': recommendations_data,
-                    'message': 'Recommendations generated and saved successfully'
-                })
-            else:
-                return jsonify({
-                    'success': False,
-                    'error': recommendations_data.get('error', 'Failed to generate recommendations')
-                }), 500
-        else:
-            return jsonify({
-                'success': False,
-                'error': 'Failed to generate recommendations'
-            }), 500
-            
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-# Send quiz user recommendations via email
-@app.route('/quiz/users/<user_id>/send-recommendations/email', methods=['POST'])
-def send_quiz_user_email_recommendations(user_id):
-    try:
-        if not ObjectId.is_valid(user_id):
-            return jsonify({
-                'success': False,
-                'error': 'Invalid user ID'
-            }), 400
-            
-        # Get quiz user data
-        quiz_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
-        if not quiz_user:
-            return jsonify({
-                'success': False,
-                'error': 'Quiz user not found'
-            }), 404
-            
-        # Check if recommendations exist
-        recommendations_data = quiz_user.get('generatedRecommendations')
-        if not recommendations_data:
-            return jsonify({
-                'success': False,
-                'error': 'No recommendations found. Please generate recommendations first.'
-            }), 400
-            
-        # Prepare data for email sending (using existing email endpoint format)
-        email_data = {
-            'email': quiz_user.get('parentEmail'),
-            'name': quiz_user.get('name'),
-            'recommendations': recommendations_data.get('current', []),
-            'readingPlan': recommendations_data.get('future', []),
-            'seriesRecommendations': recommendations_data.get('recommendations', [])
-        }
-        
-        # Use existing email sending logic
-        from flask import current_app
-        with current_app.test_request_context('/send-recommendations/email', method='POST', json=email_data):
-            email_response = send_email_recommendations()
-            
-        return email_response
-        
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-# Send quiz user recommendations via WhatsApp
-@app.route('/quiz/users/<user_id>/send-recommendations/whatsapp', methods=['POST'])
-def send_quiz_user_whatsapp_recommendations(user_id):
-    try:
-        if not ObjectId.is_valid(user_id):
-            return jsonify({
-                'success': False,
-                'error': 'Invalid user ID'
-            }), 400
-            
-        # Get quiz user data
-        quiz_user = quiz_users_collection.find_one({'_id': ObjectId(user_id)})
-        if not quiz_user:
-            return jsonify({
-                'success': False,
-                'error': 'Quiz user not found'
-            }), 404
-            
-        # Check if recommendations exist
-        recommendations_data = quiz_user.get('generatedRecommendations')
-        if not recommendations_data:
-            return jsonify({
-                'success': False,
-                'error': 'No recommendations found. Please generate recommendations first.'
-            }), 400
-            
-        # Prepare data for WhatsApp sending (using existing WhatsApp endpoint format)
-        whatsapp_data = {
-            'phone': quiz_user.get('parentPhone'),
-            'name': quiz_user.get('name'),
-            'recommendations': recommendations_data.get('recommendations', []),
-            'current': recommendations_data.get('current', []),
-            'future': recommendations_data.get('future', [])
-        }
-        
-        # Use existing WhatsApp sending logic
-        from flask import current_app
-        with current_app.test_request_context('/send-recommendations/whatsapp', method='POST', json=whatsapp_data):
-            whatsapp_response = send_whatsapp_recommendations()
-            
-        return whatsapp_response
-        
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
 # ==================== END QUIZ API ENDPOINTS ====================
 
 if __name__ == '__main__':

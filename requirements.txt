@@ -5,7 +5,6 @@ python-dotenv==1.0.0
 openai==0.28.1
 requests==2.31.0
 sendgrid==6.10.0
-twilio==8.10.0
 pandas
 python-magic-bin; sys_platform == 'win32'
 python-magic; sys_platform != 'win32'
