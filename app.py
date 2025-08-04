@@ -627,12 +627,31 @@ Age Range: {book.get('ageRange', {}).get('min', 0)}-{book.get('ageRange', {}).ge
             response = openai.ChatCompletion.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": """You are an expert children's book recommendation system that carefully considers age appropriateness, reading preferences, and personal interests. Your recommendations should:
-1. Strictly match the reader's age range and interests
-2. Only include books that would be enjoyable based on the provided preferences
-3. Prioritize books that align with multiple interest areas
-4. Consider reading level appropriateness
-5. Exclude any books that don't match the specified genres or interests"""},
+                    {"role": "system", "content": """You are an expert children's book recommendation system with a deep understanding of age-appropriate reading levels and child development stages. Your recommendations must follow these strict rules:
+
+1. AGE APPROPRIATENESS (HIGHEST PRIORITY)
+   - Only recommend books that are explicitly within the reader's age range
+   - Consider reading difficulty level appropriate for the age
+   - Factor in emotional maturity for content themes
+   - Ensure vocabulary and sentence complexity match the age group
+
+2. CONTENT MATCHING
+   - Must strictly match the specified genres and interests
+   - Content themes must be age-appropriate
+   - Avoid repetitive recommendations or similar storylines
+   - Balance fiction and non-fiction based on interests
+
+3. DIVERSITY IN RECOMMENDATIONS
+   - Never recommend the same book or series multiple times
+   - Ensure variety in writing styles and complexity levels
+   - Mix standalone books and series based on preference
+   - Include different formats (chapter books, picture books, etc.) appropriate for age
+
+4. QUALITY CONTROL
+   - Each recommendation must have a unique justification
+   - Verify age-appropriateness before including any book
+   - Double-check for duplicate recommendations
+   - Ensure recommendations are distinct and serve different reading needs"""},
                     {"role": "user", "content": f"""I need personalized book recommendations for a {age}-year-old reader with the following preferences:
 
 GENRES THEY ENJOY: {', '.join(data['selectedGenres'])}
@@ -652,17 +671,39 @@ Available books in our inventory:
 
 {book_text}
 
-📚 Please recommend **25 books** that PERFECTLY match these preferences. Group them by author or series, with at least 10 different authors/series.
+📚 Please recommend unique books that PERFECTLY match these preferences, following these strict criteria:
 
-IMPORTANT GUIDELINES:
-- Only include books that strongly match the specified genres and interests
-- Ensure age appropriateness for a {age}-year-old reader
-- If they don't prefer series, prioritize standalone books
-- Focus on books that align with their specific interests
-- Consider both fiction and non-fiction based on their preferences
-- Exclude any books or series the reader did NOT enjoy or does NOT want to read anymore
-- Prioritize books similar to those the reader LOVES
-- Exclude any books that don't match their interests or reading level
+AGE-SPECIFIC REQUIREMENTS FOR {age}-YEAR-OLD:
+- Reading Level: Must be precisely matched to {age}-year-old reading capabilities
+- Content Themes: Appropriate for {age}-year-old emotional and cognitive development
+- Complexity: Vocabulary and sentence structure suitable for this age
+- Format: Age-appropriate book format (picture books, chapter books, etc.)
+
+RECOMMENDATION RULES:
+1. NO DUPLICATES:
+   - Never recommend the same book twice
+   - Avoid multiple books from the same series unless explicitly requested
+   - Ensure each recommendation serves a unique reading purpose
+
+2. BALANCED SELECTION:
+   - Mix of genres based on preferences
+   - Balance between fiction and non-fiction
+   - Variety of writing styles and formats
+   - Different levels of reading challenge within age-appropriate range
+
+3. STRICT MATCHING:
+   - Must exactly match specified genres
+   - Must align with listed interests
+   - Must be at appropriate reading level
+   - Must exclude all mentioned disliked books/series
+
+4. VERIFICATION STEPS:
+   - Double-check age appropriateness
+   - Verify no duplicate recommendations
+   - Ensure each book has unique value proposition
+   - Confirm reading level matches age
+
+Remember: Quality over quantity - only include books that are 100% suitable for this specific age and interests.
 
 ✅ Return recommendations as a JSON array with this structure:
 [
@@ -767,7 +808,8 @@ IMPORTANT GUIDELINES:
                         current_recs.append({
                             'title': book['title'],
                             'author': rec['name'],
-                            'explanation': rec['rationale']
+                            'explanation': rec['rationale'],
+                            'justbookify_link': rec['justbookify_link']
                         })
 
             # Create future months recommendations
@@ -776,15 +818,16 @@ IMPORTANT GUIDELINES:
 
             for i in range(3):
                 month_books = []
-                month_start = i * 2
-                month_end = month_start + 2
+                month_start = i * 4  # Changed from 2 to 4 books per month
+                month_end = month_start + 4  # Changed from 2 to 4 books per month
 
                 for rec in remaining_recs[month_start:month_end]:
                     for book in rec['sample_books'][:1]:
                         month_books.append({
                             'title': book['title'],
                             'author': rec['name'],
-                            'explanation': rec['rationale']
+                            'explanation': rec['rationale'],
+                            'justbookify_link': rec['justbookify_link']  # Also adding justbookify_link to future recommendations
                         })
 
                 future_recs.append({
