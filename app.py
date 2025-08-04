@@ -35,9 +35,10 @@ recommendations_collection = db['recommendations']
 consent_collection = db['parent_consent']
 quiz_users_collection = db['quiz_users']  # New collection for quiz users
 quiz_responses_collection = db['quiz_responses']  # New collection for detailed quiz responses
+recommendation_plans_collection = db['recommendation_plans']  # New collection for recommendation plans
 
 # Age groups configuration
-AGE_GROUPS = ['4-7', '8-10', '11+']
+AGE_GROUPS = ['Below 5', '6-8', '9-10', '11-12', '13+']
 
 # Configure OpenAI
 openai.api_key = os.getenv('OPENAI_API_KEY')
@@ -72,13 +73,12 @@ def validate_age_group(age_group):
 # Helper function to initialize recommendations
 def initialize_recommendations():
     try:
-        # Check if recommendations exist for all age groups
         for age_group in AGE_GROUPS:
             existing = recommendations_collection.find_one({'age_group': age_group})
             if not existing:
                 recommendations_collection.insert_one({
                     'age_group': age_group,
-                    'books': []
+                    'books': []  # Now stores list of book objects
                 })
     except Exception as e:
         print(f"Error initializing recommendations: {str(e)}")
@@ -157,125 +157,57 @@ def submit_parent_consent():
 @app.route('/recommendations', methods=['GET'])
 def get_recommendations():
     try:
-        # Get all recommendations
         all_recommendations = list(recommendations_collection.find())
-        
-        # Format response
         recommendations_dict = {}
         for rec in all_recommendations:
             age_group = rec['age_group']
-            book_ids = rec.get('books', [])
-            
-            # Get book details for each book ID
-            books = []
-            for book_id in book_ids:
-                if ObjectId.is_valid(book_id):
-                    book = books_collection.find_one({'_id': ObjectId(book_id)})
-                    if book:
-                        books.append(format_document(book))
-            
-            recommendations_dict[age_group] = books
-            
+            recommendations_dict[age_group] = rec.get('books', [])
         return jsonify(recommendations_dict)
     except Exception as e:
-        return jsonify({
-            'error': str(e)
-        }), 500
+        return jsonify({'error': str(e)}), 500
 
 # Update recommendations for an age group
 @app.route('/recommendations/<age_group>', methods=['PUT'])
 def update_recommendations(age_group):
     try:
-        # Validate age group
         validate_age_group(age_group)
-        
-        # Get book IDs from request
         books = request.json
         if not isinstance(books, list):
             return jsonify({
                 'error': 'Invalid request format. Expected list of books.'
             }), 400
-            
-        # Extract book IDs and validate they exist
-        book_ids = []
+        # Validate each book has at least id, title, author
         for book in books:
-            book_id = book.get('id')
-            if not book_id or not ObjectId.is_valid(book_id):
+            if not all(key in book and book[key] for key in ['id', 'title', 'author']):
                 return jsonify({
-                    'error': f'Invalid book ID: {book_id}'
+                    'error': 'Each book must have id, title, and author.'
                 }), 400
-                
-            # Verify book exists
-            if not books_collection.find_one({'_id': ObjectId(book_id)}):
-                return jsonify({
-                    'error': f'Book not found: {book_id}'
-                }), 404
-                
-            book_ids.append(book_id)
-            
-        # Update recommendations
+        # Store the book objects directly
         recommendations_collection.update_one(
             {'age_group': age_group},
-            {'$set': {'books': book_ids}},
+            {'$set': {'books': books}},
             upsert=True
         )
-        
-        # Get updated recommendations
-        updated_rec = recommendations_collection.find_one({'age_group': age_group})
-        if not updated_rec:
-            return jsonify({
-                'error': 'Failed to update recommendations'
-            }), 500
-            
-        # Get book details
-        books = []
-        for book_id in updated_rec.get('books', []):
-            if ObjectId.is_valid(book_id):
-                book = books_collection.find_one({'_id': ObjectId(book_id)})
-                if book:
-                    books.append(format_document(book))
-                    
-        return jsonify(books)
-        
+        return jsonify({'success': True}), 200
     except ValueError as e:
-        return jsonify({
-            'error': str(e)
-        }), 400
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
-        return jsonify({
-            'error': str(e)
-        }), 500
+        return jsonify({'error': str(e)}), 500
 
 # Get recommendations for specific age group
 @app.route('/recommendations/<age_group>', methods=['GET'])
 def get_age_group_recommendations(age_group):
     try:
-        # Validate age group
         validate_age_group(age_group)
-        
-        # Get recommendations
         rec = recommendations_collection.find_one({'age_group': age_group})
         if not rec:
             return jsonify([])
-            
-        # Get book details
-        books = []
-        for book_id in rec.get('books', []):
-            if ObjectId.is_valid(book_id):
-                book = books_collection.find_one({'_id': ObjectId(book_id)})
-                if book:
-                    books.append(format_document(book))
-                    
-        return jsonify(books)
-        
+        # Return the stored book objects directly
+        return jsonify(rec.get('books', []))
     except ValueError as e:
-        return jsonify({
-            'error': str(e)
-        }), 400
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
-        return jsonify({
-            'error': str(e)
-        }), 500
+        return jsonify({'error': str(e)}), 500
 
 # Get all books
 @app.route('/books', methods=['GET'])
@@ -595,6 +527,39 @@ def generate_recommendation_plan():
 
         # No longer using SerpAPI - creating direct JustBookify search links
         
+        # Helper to map age to age group
+        def get_age_group(age):
+            if age < 5:
+                return 'Below 5'
+            elif 5 <= age <= 8:
+                return '6-8'
+            elif 9 <= age <= 10:
+                return '9-10'
+            elif 11 <= age <= 12:
+                return '11-12'
+            else:
+                return '13+'
+
+        age_group = get_age_group(age)
+        # Fetch recommendations for the user's age group
+        rec_doc = recommendations_collection.find_one({'age_group': age_group})
+        rec_books = rec_doc.get('books', []) if rec_doc else []
+        rec_by_id = {b['id']: b for b in rec_books if 'id' in b}
+
+        # Extract exclusion and prioritization lists from bookSeries, using full title/author
+        book_series = data.get('bookSeries', [])
+        exclude_series = []
+        prioritize_series = []
+        for s in book_series:
+            rec = rec_by_id.get(s.get('seriesId'))
+            if not rec:
+                continue
+            entry = f"{rec['title']} by {rec['author']}"
+            if s.get('response') in ['didNotEnjoy', 'dontReadAnymore']:
+                exclude_series.append(entry)
+            if s.get('response') == 'love':
+                prioritize_series.append(entry)
+        
         # Debug logging for database query
         print(f"Querying books for age: {age}, genres: {selected_genres}")
         
@@ -660,7 +625,7 @@ Age Range: {book.get('ageRange', {}).get('min', 0)}-{book.get('ageRange', {}).ge
         # Get recommendations from OpenAI with updated prompt
         try:
             response = openai.ChatCompletion.create(
-                model="gpt-4",
+                model="gpt-4o",
                 messages=[
                     {"role": "system", "content": """You are an expert children's book recommendation system that carefully considers age appropriateness, reading preferences, and personal interests. Your recommendations should:
 1. Strictly match the reader's age range and interests
@@ -675,6 +640,14 @@ SPECIFIC INTERESTS: {', '.join(data['selectedInterests'])}
 NON-FICTION INTERESTS: {', '.join(data['nonFictionInterests'])}
 BOOK SERIES PREFERENCE: They {'enjoy' if data['bookSeries'] else 'do not prefer'} book series.
 
+SERIES/BOOKS TO EXCLUDE: The reader has indicated they did NOT enjoy or do NOT want to read the following series/books:
+{chr(10).join(exclude_series) if exclude_series else 'None'}
+Do NOT recommend any books from these series/authors.
+
+SERIES/BOOKS TO PRIORITIZE: The reader LOVES the following series/books:
+{chr(10).join(prioritize_series) if prioritize_series else 'None'}
+If possible, recommend similar books or series.
+
 Available books in our inventory:
 
 {book_text}
@@ -687,6 +660,8 @@ IMPORTANT GUIDELINES:
 - If they don't prefer series, prioritize standalone books
 - Focus on books that align with their specific interests
 - Consider both fiction and non-fiction based on their preferences
+- Exclude any books or series the reader did NOT enjoy or does NOT want to read anymore
+- Prioritize books similar to those the reader LOVES
 - Exclude any books that don't match their interests or reading level
 
 ✅ Return recommendations as a JSON array with this structure:
@@ -725,33 +700,52 @@ IMPORTANT GUIDELINES:
         try:
             raw_content = response.choices[0].message.content
             print("Parsing OpenAI response...")
-            
-            # Parse JSON response
-            recommendations_json = json.loads(raw_content)
+
+            # Try to extract JSON array from the response using regex
+            import re
+            json_match = re.search(r'(\[\s*{.*}\s*\])', raw_content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # Fallback: try to parse the whole content
+                json_str = raw_content.strip()
+
+            # Try to load JSON
+            try:
+                recommendations_json = json.loads(json_str)
+            except Exception as e:
+                print("Failed to parse JSON directly, trying to fix common issues...")
+                # Try to fix common issues (e.g., trailing commas)
+                json_str_fixed = re.sub(r',\s*}', '}', json_str)
+                json_str_fixed = re.sub(r',\s*\]', ']', json_str_fixed)
+                recommendations_json = json.loads(json_str_fixed)
+
             recommendations = []
-            
+
             for rec in recommendations_json:
                 series_name = rec.get('name', '')
                 confidence_score = rec.get('likely_score', 8)
                 rationale = rec.get('rationale', '')
                 sample_books = [{"title": title, "author": series_name} for title in rec.get('books', [])]
-                
+
                 if series_name and sample_books:
                     # Create direct JustBookify search link - clean up the series name
                     clean_name = series_name.lower()
-                    # Remove various forms of "series" from the name
                     clean_name = clean_name.replace(" series name", "")
                     clean_name = clean_name.replace("series name", "")
                     clean_name = clean_name.replace(" series", "")
                     clean_name = clean_name.replace("series", "")
-                    # Remove any extra whitespace and trim
                     clean_name = " ".join(clean_name.split()).strip()
-                    # If name is empty after cleaning, use original name
                     if not clean_name:
                         clean_name = series_name.lower().strip()
-                    search_term = urllib.parse.quote(clean_name)
+                    # Remove generic suffixes like 'comics', 'books', etc. from the search term
+                    generic_suffixes = ['comics', 'books', 'series', 'collection', 'novels']
+                    words = clean_name.split()
+                    filtered_words = [w for w in words if w not in generic_suffixes]
+                    filtered_name = " ".join(filtered_words).strip()
+                    search_term = urllib.parse.quote(filtered_name if filtered_name else clean_name)
                     justbookify_link = f"https://www.justbookify.com/search?q={search_term}&options%5Bprefix%5D=last"
-                    
+
                     recommendations.append({
                         "name": series_name,
                         "justbookify_link": justbookify_link,
@@ -779,12 +773,12 @@ IMPORTANT GUIDELINES:
             # Create future months recommendations
             future_recs = []
             remaining_recs = recommendations[3:] if len(recommendations) > 3 else []
-            
+
             for i in range(3):
                 month_books = []
                 month_start = i * 2
                 month_end = month_start + 2
-                
+
                 for rec in remaining_recs[month_start:month_end]:
                     for book in rec['sample_books'][:1]:
                         month_books.append({
@@ -792,7 +786,7 @@ IMPORTANT GUIDELINES:
                             'author': rec['name'],
                             'explanation': rec['rationale']
                         })
-                
+
                 future_recs.append({
                     'month': (datetime.now().replace(day=1) + timedelta(days=i*31)).strftime('%B'),
                     'books': month_books
@@ -801,21 +795,56 @@ IMPORTANT GUIDELINES:
             print("Returning results...")
             print(f"Current recommendations: {len(current_recs)}")
             print(f"Future months: {len(future_recs)}")
-            
-            return jsonify({
-                'current': current_recs,
-                'future': future_recs,
-                'recommendations': recommendations
-            })
 
-        except json.JSONDecodeError as e:
-            print(f"JSON parsing error: {str(e)}")
-            return jsonify({
-                'current': [],
-                'future': empty_reading_plan,
-                'recommendations': [],
-                'error': f'JSON parsing error: {str(e)}'
-            })
+            # Save user input and recommendations to database
+            try:
+                plan_data = {
+                    'name': data['name'],
+                    'age': data['age'],
+                    'selectedGenres': data['selectedGenres'],
+                    'selectedInterests': data['selectedInterests'],
+                    'nonFictionInterests': data['nonFictionInterests'],
+                    'bookSeries': data['bookSeries'],
+                    'parentEmail': data['parentEmail'],
+                    'parentPhone': data['parentPhone'],
+                    'parentReading': data.get('parentReading'),
+                    'topThreeGenres': data.get('topThreeGenres', []),
+                    'fictionGenres': data.get('fictionGenres', []),
+                    'nonFictionGenres': data.get('nonFictionGenres', []),
+                    'additionalGenres': data.get('additionalGenres', []),
+                    'fictionNonFictionRatio': data.get('fictionNonFictionRatio'),
+                    'recommendations': recommendations,
+                    'currentRecommendations': current_recs,
+                    'futureRecommendations': future_recs,
+                    'createdAt': datetime.utcnow(),
+                    'updatedAt': datetime.utcnow(),
+                    'status': 'active'
+                }
+                
+                # Insert the recommendation plan
+                result = recommendation_plans_collection.insert_one(plan_data)
+                plan_id = str(result.inserted_id)
+                
+                print(f"Saved recommendation plan with ID: {plan_id}")
+                
+                return jsonify({
+                    'current': current_recs,
+                    'future': future_recs,
+                    'recommendations': recommendations,
+                    'planId': plan_id,
+                    'message': 'Recommendation plan generated and saved successfully'
+                })
+                
+            except Exception as save_error:
+                print(f"Error saving recommendation plan: {str(save_error)}")
+                # Return results even if save fails
+                return jsonify({
+                    'current': current_recs,
+                    'future': future_recs,
+                    'recommendations': recommendations,
+                    'error': f'Recommendations generated but failed to save: {str(save_error)}'
+                })
+
         except Exception as e:
             print(f"Error processing recommendations: {str(e)}")
             import traceback
@@ -1640,6 +1669,315 @@ def get_all_quiz_users():
             'error': str(e)
         }), 500
 # ==================== END QUIZ API ENDPOINTS ====================
+
+# ==================== RECOMMENDATION PLANS API ENDPOINTS ====================
+
+# Get all recommendation plans
+@app.route('/recommendation-plans', methods=['GET'])
+def get_all_recommendation_plans():
+    try:
+        # Get query parameters for filtering
+        page = int(request.args.get('page', 1))
+        limit = int(request.args.get('limit', 10))
+        status = request.args.get('status', 'active')
+        email = request.args.get('email')
+        
+        # Build filter
+        filter_query = {}
+        if status:
+            filter_query['status'] = status
+        if email:
+            filter_query['parentEmail'] = {'$regex': email, '$options': 'i'}
+        
+        # Calculate skip value for pagination
+        skip = (page - 1) * limit
+        
+        # Get total count
+        total_count = recommendation_plans_collection.count_documents(filter_query)
+        
+        # Get plans with pagination
+        plans = list(recommendation_plans_collection.find(filter_query)
+                    .sort('createdAt', -1)
+                    .skip(skip)
+                    .limit(limit))
+        
+        # Format plans
+        formatted_plans = [format_document(plan) for plan in plans]
+        
+        return jsonify({
+            'success': True,
+            'plans': formatted_plans,
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total': total_count,
+                'pages': (total_count + limit - 1) // limit
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Get single recommendation plan by ID
+@app.route('/recommendation-plans/<plan_id>', methods=['GET'])
+def get_recommendation_plan(plan_id):
+    try:
+        if not ObjectId.is_valid(plan_id):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid plan ID'
+            }), 400
+        
+        plan = recommendation_plans_collection.find_one({'_id': ObjectId(plan_id)})
+        
+        if not plan:
+            return jsonify({
+                'success': False,
+                'error': 'Recommendation plan not found'
+            }), 404
+        
+        return jsonify({
+            'success': True,
+            'plan': format_document(plan)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Update recommendation plan
+@app.route('/recommendation-plans/<plan_id>', methods=['PUT'])
+def update_recommendation_plan(plan_id):
+    try:
+        if not ObjectId.is_valid(plan_id):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid plan ID'
+            }), 400
+        
+        data = request.json
+        
+        # Check if plan exists
+        existing_plan = recommendation_plans_collection.find_one({'_id': ObjectId(plan_id)})
+        if not existing_plan:
+            return jsonify({
+                'success': False,
+                'error': 'Recommendation plan not found'
+            }), 404
+        
+        # Add update timestamp
+        data['updatedAt'] = datetime.utcnow()
+        
+        # Update the plan
+        result = recommendation_plans_collection.update_one(
+            {'_id': ObjectId(plan_id)},
+            {'$set': data}
+        )
+        
+        if result.modified_count == 0:
+            return jsonify({
+                'success': False,
+                'error': 'No changes made to the plan'
+            }), 400
+        
+        # Get updated plan
+        updated_plan = recommendation_plans_collection.find_one({'_id': ObjectId(plan_id)})
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recommendation plan updated successfully',
+            'plan': format_document(updated_plan)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Delete single recommendation plan
+@app.route('/recommendation-plans/<plan_id>', methods=['DELETE'])
+def delete_recommendation_plan(plan_id):
+    try:
+        if not ObjectId.is_valid(plan_id):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid plan ID'
+            }), 400
+        
+        # Check if plan exists
+        existing_plan = recommendation_plans_collection.find_one({'_id': ObjectId(plan_id)})
+        if not existing_plan:
+            return jsonify({
+                'success': False,
+                'error': 'Recommendation plan not found'
+            }), 404
+        
+        # Delete the plan
+        result = recommendation_plans_collection.delete_one({'_id': ObjectId(plan_id)})
+        
+        if result.deleted_count == 0:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to delete recommendation plan'
+            }), 500
+        
+        return jsonify({
+            'success': True,
+            'message': 'Recommendation plan deleted successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Delete all recommendation plans
+@app.route('/recommendation-plans', methods=['DELETE'])
+def delete_all_recommendation_plans():
+    try:
+        # Get query parameters for filtering what to delete
+        status = request.args.get('status')
+        email = request.args.get('email')
+        
+        # Build filter
+        filter_query = {}
+        if status:
+            filter_query['status'] = status
+        if email:
+            filter_query['parentEmail'] = {'$regex': email, '$options': 'i'}
+        
+        # If no filter is provided, delete all plans
+        if not filter_query:
+            # For safety, require confirmation
+            confirm = request.args.get('confirm')
+            if confirm != 'true':
+                return jsonify({
+                    'success': False,
+                    'error': 'To delete all plans, add ?confirm=true to the URL'
+                }), 400
+        
+        # Get count before deletion
+        count_before = recommendation_plans_collection.count_documents(filter_query)
+        
+        # Delete plans
+        result = recommendation_plans_collection.delete_many(filter_query)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Successfully deleted {result.deleted_count} recommendation plans',
+            'deletedCount': result.deleted_count,
+            'totalBefore': count_before
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Get recommendation plans by email
+@app.route('/recommendation-plans/email/<email>', methods=['GET'])
+def get_recommendation_plans_by_email(email):
+    try:
+        # URL decode the email
+        decoded_email = urllib.parse.unquote(email)
+        
+        # Get plans for the email
+        plans = list(recommendation_plans_collection.find({
+            'parentEmail': {'$regex': decoded_email, '$options': 'i'}
+        }).sort('createdAt', -1))
+        
+        formatted_plans = [format_document(plan) for plan in plans]
+        
+        return jsonify({
+            'success': True,
+            'plans': formatted_plans,
+            'count': len(formatted_plans)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# Get recommendation plans statistics
+@app.route('/recommendation-plans/stats', methods=['GET'])
+def get_recommendation_plans_stats():
+    try:
+        # Get total count
+        total_plans = recommendation_plans_collection.count_documents({})
+        
+        # Get count by status
+        active_plans = recommendation_plans_collection.count_documents({'status': 'active'})
+        inactive_plans = recommendation_plans_collection.count_documents({'status': 'inactive'})
+        
+        # Get count by age groups
+        age_stats = list(recommendation_plans_collection.aggregate([
+            {
+                '$group': {
+                    '_id': {
+                        '$cond': {
+                            'if': {'$lt': ['$age', 5]},
+                            'then': 'Below 5',
+                            'else': {
+                                '$cond': {
+                                    'if': {'$lte': ['$age', 8]},
+                                    'then': '6-8',
+                                    'else': {
+                                        '$cond': {
+                                            'if': {'$lte': ['$age', 10]},
+                                            'then': '9-10',
+                                            'else': {
+                                                '$cond': {
+                                                    'if': {'$lte': ['$age', 12]},
+                                                    'then': '11-12',
+                                                    'else': '13+'
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    'count': {'$sum': 1}
+                }
+            },
+            {'$sort': {'_id': 1}}
+        ]))
+        
+        # Get recent plans (last 7 days)
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        recent_plans = recommendation_plans_collection.count_documents({
+            'createdAt': {'$gte': seven_days_ago}
+        })
+        
+        return jsonify({
+            'success': True,
+            'stats': {
+                'total': total_plans,
+                'active': active_plans,
+                'inactive': inactive_plans,
+                'recent': recent_plans,
+                'ageGroups': age_stats
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# ==================== END RECOMMENDATION PLANS API ENDPOINTS ====================
 
 if __name__ == '__main__':
     app.run(debug=True)
