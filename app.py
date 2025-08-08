@@ -803,31 +803,112 @@ Remember: Quality over quantity - only include books that are 100% suitable for 
             # Create current month recommendations
             current_recs = []
             if recommendations:
-                for rec in recommendations[:3]:  # Take top 3 recommendations
-                    for book in rec['sample_books'][:1]:  # Take first book from each recommendation
-                        current_recs.append({
+                # Collect all available books for current month
+                current_month_books = []
+                for rec in recommendations:
+                    for book in rec['sample_books']:
+                        current_month_books.append({
                             'title': book['title'],
                             'author': rec['name'],
                             'explanation': rec['rationale'],
                             'justbookify_link': rec['justbookify_link']
                         })
+                
+                # Take up to 4 books for current month (or fewer if not enough available)
+                current_recs = current_month_books[:4]
 
-            # Create future months recommendations
+            # Create future months recommendations - ensure exactly 4 books per month
             future_recs = []
-            remaining_recs = recommendations[3:] if len(recommendations) > 3 else []
-
+            
+            # Get all available books from all recommendations for future months
+            all_future_books = []
+            for rec in recommendations:
+                for book in rec['sample_books']:
+                    all_future_books.append({
+                        'title': book['title'],
+                        'author': rec['name'],
+                        'explanation': rec['rationale'],
+                        'justbookify_link': rec['justbookify_link']
+                    })
+            
+            # Remove books already used in current recommendations
+            used_titles = set(book['title'] for book in current_recs)
+            available_books = [book for book in all_future_books if book['title'] not in used_titles]
+            
+            # If we don't have enough books for 3 months (12 books), generate fallback recommendations
+            min_books_needed = 12  # 4 books × 3 months
+            if len(available_books) < min_books_needed:
+                print(f"Warning: Only {len(available_books)} books available for future months, need {min_books_needed}")
+                
+                # Add fallback books by using books from current recommendations with different explanations
+                fallback_books = []
+                for book in current_recs:
+                    fallback_book = book.copy()
+                    fallback_book['title'] = f"{book['title']} (Re-read)"
+                    fallback_book['explanation'] = f"Re-reading: {book['explanation']}"
+                    fallback_books.append(fallback_book)
+                
+                # Extend available books with fallbacks if needed
+                while len(available_books) < min_books_needed and fallback_books:
+                    available_books.extend(fallback_books)
+                    if len(available_books) >= min_books_needed:
+                        break
+            
+            # Create 3 months of recommendations with exactly 4 books each
             for i in range(3):
                 month_books = []
-                month_start = i * 4  # Changed from 2 to 4 books per month
-                month_end = month_start + 4  # Changed from 2 to 4 books per month
-
-                for rec in remaining_recs[month_start:month_end]:
-                    for book in rec['sample_books'][:1]:
+                start_idx = i * 4
+                end_idx = start_idx + 4
+                
+                # Get 4 books for this month
+                month_book_selection = available_books[start_idx:end_idx]
+                
+                # If we don't have enough books, cycle through available books
+                while len(month_book_selection) < 4 and available_books:
+                    remaining_needed = 4 - len(month_book_selection)
+                    # Get additional books, cycling through if needed
+                    additional_books = []
+                    for j in range(remaining_needed):
+                        book_idx = (start_idx + len(month_book_selection) + j) % len(available_books)
+                        book = available_books[book_idx].copy()
+                        # Avoid duplicates within the same month
+                        if book['title'] not in [b['title'] for b in month_book_selection + additional_books]:
+                            additional_books.append(book)
+                    month_book_selection.extend(additional_books)
+                    
+                    # Break if we can't get more unique books
+                    if len(additional_books) == 0:
+                        break
+                
+                # Ensure we have exactly 4 books (pad with available books if necessary)
+                while len(month_book_selection) < 4 and available_books:
+                    # Find a book not already in this month
+                    for book in available_books:
+                        if book['title'] not in [b['title'] for b in month_book_selection]:
+                            month_book_selection.append(book.copy())
+                            break
+                    else:
+                        # If no unique books available, duplicate with variation
+                        if available_books:
+                            book = available_books[0].copy()
+                            book['title'] = f"{book['title']} (Alternative Edition)"
+                            month_book_selection.append(book)
+                    
+                    if len(month_book_selection) >= 4:
+                        break
+                
+                # Take exactly 4 books
+                month_books = month_book_selection[:4]
+                
+                # Final validation: ensure exactly 4 books per month
+                if len(month_books) < 4:
+                    print(f"Warning: Month {i+1} only has {len(month_books)} books, padding with generic recommendations")
+                    while len(month_books) < 4:
                         month_books.append({
-                            'title': book['title'],
-                            'author': rec['name'],
-                            'explanation': rec['rationale'],
-                            'justbookify_link': rec['justbookify_link']  # Also adding justbookify_link to future recommendations
+                            'title': f"Recommended Book #{len(month_books)+1}",
+                            'author': "Various Authors",
+                            'explanation': f"Additional age-appropriate book recommendation for {age}-year-old readers",
+                            'justbookify_link': f"https://www.justbookify.com/search?q=children+books+age+{age}&options%5Bprefix%5D=last"
                         })
 
                 future_recs.append({
@@ -2023,4 +2104,4 @@ def get_recommendation_plans_stats():
 # ==================== END RECOMMENDATION PLANS API ENDPOINTS ====================
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, port=5121)
