@@ -708,7 +708,8 @@ Remember: Quality over quantity - only include books that are 100% suitable for 
 ✅ Return recommendations as a JSON array with this structure:
 [
   {{
-    "name": "Series/Author Name",
+    "series_name": "Name of the book series (e.g., \"Harry Potter\", \"Magic Tree House\")",
+    "author_name": "Author's actual name (e.g., \"J.K. Rowling\", \"Mary Pope Osborne\")",
     "likely_score": X,  // Score 1-10 based on match with preferences
     "books": [
       "Book Title 1",
@@ -764,10 +765,11 @@ Remember: Quality over quantity - only include books that are 100% suitable for 
             recommendations = []
 
             for rec in recommendations_json:
-                series_name = rec.get('name', '')
+                series_name = rec.get('series_name', '')
+                author_name = rec.get('author_name', '')
                 confidence_score = rec.get('likely_score', 8)
                 rationale = rec.get('rationale', '')
-                sample_books = [{"title": title, "author": series_name} for title in rec.get('books', [])]
+                sample_books = [{"title": title, "author": author_name} for title in rec.get('books', [])]
 
                 if series_name and sample_books:
                     # Create direct JustBookify search link - clean up the series name
@@ -788,13 +790,14 @@ Remember: Quality over quantity - only include books that are 100% suitable for 
                     justbookify_link = f"https://www.justbookify.com/search?q={search_term}&options%5Bprefix%5D=last"
 
                     recommendations.append({
-                        "name": series_name,
+                        "series_name": series_name,
+                        "author_name": author_name,
                         "justbookify_link": justbookify_link,
                         "rationale": rationale,
                         "confidence_score": confidence_score,
                         "sample_books": sample_books
                     })
-                    print(f"Added recommendation for {series_name} with {len(sample_books)} books and link {justbookify_link}")
+                    print(f"Added recommendation for {series_name} by {author_name} with {len(sample_books)} books and link {justbookify_link}")
 
             # Sort recommendations by confidence score
             recommendations.sort(key=lambda x: x['confidence_score'], reverse=True)
@@ -809,7 +812,8 @@ Remember: Quality over quantity - only include books that are 100% suitable for 
                     for book in rec['sample_books']:
                         current_month_books.append({
                             'title': book['title'],
-                            'author': rec['name'],
+                            'author': book['author'],  # Now properly contains the author name
+                            'series': rec['series_name'],  # Series name from OpenAI response
                             'explanation': rec['rationale'],
                             'justbookify_link': rec['justbookify_link']
                         })
@@ -826,7 +830,8 @@ Remember: Quality over quantity - only include books that are 100% suitable for 
                 for book in rec['sample_books']:
                     all_future_books.append({
                         'title': book['title'],
-                        'author': rec['name'],
+                        'author': book['author'],  # Now properly contains the author name
+                        'series': rec['series_name'],  # Series name from OpenAI response
                         'explanation': rec['rationale'],
                         'justbookify_link': rec['justbookify_link']
                     })
@@ -840,12 +845,14 @@ Remember: Quality over quantity - only include books that are 100% suitable for 
             if len(available_books) < min_books_needed:
                 print(f"Warning: Only {len(available_books)} books available for future months, need {min_books_needed}")
                 
-                # Add fallback books by using books from current recommendations with different explanations
+                # Add fallback books by creating additional recommendations from the same series
                 fallback_books = []
                 for book in current_recs:
                     fallback_book = book.copy()
-                    fallback_book['title'] = f"{book['title']} (Re-read)"
-                    fallback_book['explanation'] = f"Re-reading: {book['explanation']}"
+                    series_name = book.get('series', book['author'])
+                    fallback_book['title'] = f"Additional {series_name} Book"
+                    fallback_book['explanation'] = f"Another great book from the {series_name} series that matches your child's interests"
+                    fallback_book['series'] = series_name
                     fallback_books.append(fallback_book)
                 
                 # Extend available books with fallbacks if needed
@@ -905,9 +912,10 @@ Remember: Quality over quantity - only include books that are 100% suitable for 
                     print(f"Warning: Month {i+1} only has {len(month_books)} books, padding with generic recommendations")
                     while len(month_books) < 4:
                         month_books.append({
-                            'title': f"Recommended Book #{len(month_books)+1}",
+                            'title': f"Age-Appropriate Book #{len(month_books)+1}",
                             'author': "Various Authors",
-                            'explanation': f"Additional age-appropriate book recommendation for {age}-year-old readers",
+                            'series': f"Curated {age}-Year-Old Collection",
+                            'explanation': f"Additional age-appropriate book recommendation carefully selected for {age}-year-old readers",
                             'justbookify_link': f"https://www.justbookify.com/search?q=children+books+age+{age}&options%5Bprefix%5D=last"
                         })
 
@@ -1010,13 +1018,13 @@ def send_email_recommendations():
         
         <h3>Current Recommendations:</h3>
         <ul>
-        {''.join(f'<li><strong>{book["title"]}</strong> by {book["author"]}<br/><em>{book.get("explanation", "")}</em></li>' for book in data['recommendations'])}
+        {''.join(f'<li><strong>{book["title"]}</strong><br/>Series: {book.get("series", book["author"])}<br/>Author: {book["author"]}<br/><em>{book.get("explanation", "")}</em></li>' for book in data['recommendations'])}
         </ul>
 
         <h3>Recommended Series and Authors:</h3>
         {''.join(f'''
         <div style="margin-bottom: 20px;">
-            <h4><a href="{rec['justbookify_link']}" target="_blank">{rec['name']}</a> (Confidence Score: {rec.get('confidence_score', 'N/A')}/10)</h4>
+            <h4><a href="{rec['justbookify_link']}" target="_blank">{rec['series_name']}</a> by {rec['author_name']} (Confidence Score: {rec.get('confidence_score', 'N/A')}/10)</h4>
             <p><em>{rec.get('rationale', '')}</em></p>
             <ul>
             {''.join(f'<li><strong>{book["title"]}</strong> by {book["author"]}</li>' for book in rec.get('sample_books', []))}
@@ -1029,7 +1037,7 @@ def send_email_recommendations():
         <div style="margin-bottom: 20px;">
             <h4>{month['month']}</h4>
             <ul>
-            {''.join(f'<li><strong>{book["title"]}</strong> by {book["author"]}<br/><em>{book.get("explanation", "")}</em></li>' for book in month['books'])}
+            {''.join(f'<li><strong>{book["title"]}</strong><br/>Series: {book.get("series", book["author"])}<br/>Author: {book["author"]}<br/><em>{book.get("explanation", "")}</em></li>' for book in month['books'])}
             </ul>
         </div>
         ''' for month in data['readingPlan'])}

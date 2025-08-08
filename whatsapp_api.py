@@ -182,7 +182,7 @@ def format_book_recommendations_messages(data: Dict[str, Any]) -> List[str]:
         current_series_message = series_header
         
         for rec in data['recommendations']:
-            series_text = f"\n{rec['name']} (Score: {rec.get('confidence_score', 'N/A')}/10)\n"
+            series_text = f"\n{rec.get('series_name', rec.get('name', 'Unknown Series'))} by {rec.get('author_name', 'Unknown Author')} (Score: {rec.get('confidence_score', 'N/A')}/10)\n"
             if rec.get('rationale'):
                 series_text += f"Why: {rec['rationale'][:100]}...\n"
             
@@ -190,10 +190,7 @@ def format_book_recommendations_messages(data: Dict[str, Any]) -> List[str]:
             if rec.get('sample_books'):
                 series_text += "Featured Books:\n"
                 for book in rec['sample_books'][:2]:
-                    book_text = f"• {book['title']}"
-                    if book.get('series'):
-                        book_text += f" ({book['series']} Series)"
-                    book_text += f" by {book['author']}\n"
+                    book_text = f"• {book['title']} by {book['author']}\n"
                     series_text += book_text
             
             series_text += f"🔍 View More: {rec['justbookify_link']}\n"
