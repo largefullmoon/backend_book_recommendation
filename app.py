@@ -708,8 +708,7 @@ Remember: Quality over quantity - only include books that are 100% suitable for 
 ✅ Return recommendations as a JSON array with this structure:
 [
   {{
-    "series_name": "Name of the book series (e.g., \"Harry Potter\", \"Magic Tree House\")",
-    "author_name": "Author's actual name (e.g., \"J.K. Rowling\", \"Mary Pope Osborne\")",
+    "name": "Series/Author Name",
     "likely_score": X,  // Score 1-10 based on match with preferences
     "books": [
       "Book Title 1",
@@ -765,11 +764,10 @@ Remember: Quality over quantity - only include books that are 100% suitable for 
             recommendations = []
 
             for rec in recommendations_json:
-                series_name = rec.get('series_name', '')
-                author_name = rec.get('author_name', '')
+                series_name = rec.get('name', '')
                 confidence_score = rec.get('likely_score', 8)
                 rationale = rec.get('rationale', '')
-                sample_books = [{"title": title, "author": author_name} for title in rec.get('books', [])]
+                sample_books = [{"title": title, "author": series_name} for title in rec.get('books', [])]
 
                 if series_name and sample_books:
                     # Create direct JustBookify search link - clean up the series name
@@ -790,14 +788,13 @@ Remember: Quality over quantity - only include books that are 100% suitable for 
                     justbookify_link = f"https://www.justbookify.com/search?q={search_term}&options%5Bprefix%5D=last"
 
                     recommendations.append({
-                        "series_name": series_name,
-                        "author_name": author_name,
+                        "name": series_name,
                         "justbookify_link": justbookify_link,
                         "rationale": rationale,
                         "confidence_score": confidence_score,
                         "sample_books": sample_books
                     })
-                    print(f"Added recommendation for {series_name} by {author_name} with {len(sample_books)} books and link {justbookify_link}")
+                    print(f"Added recommendation for {series_name} with {len(sample_books)} books and link {justbookify_link}")
 
             # Sort recommendations by confidence score
             recommendations.sort(key=lambda x: x['confidence_score'], reverse=True)
@@ -806,117 +803,31 @@ Remember: Quality over quantity - only include books that are 100% suitable for 
             # Create current month recommendations
             current_recs = []
             if recommendations:
-                # Collect all available books for current month
-                current_month_books = []
-                for rec in recommendations:
-                    for book in rec['sample_books']:
-                        current_month_books.append({
+                for rec in recommendations[:3]:  # Take top 3 recommendations
+                    for book in rec['sample_books'][:1]:  # Take first book from each recommendation
+                        current_recs.append({
                             'title': book['title'],
-                            'author': book['author'],  # Now properly contains the author name
-                            'series': rec['series_name'],  # Series name from OpenAI response
+                            'author': rec['name'],
                             'explanation': rec['rationale'],
                             'justbookify_link': rec['justbookify_link']
                         })
-                
-                # Take up to 4 books for current month (or fewer if not enough available)
-                current_recs = current_month_books[:4]
 
-            # Create future months recommendations - ensure exactly 4 books per month
+            # Create future months recommendations
             future_recs = []
-            
-            # Get all available books from all recommendations for future months
-            all_future_books = []
-            for rec in recommendations:
-                for book in rec['sample_books']:
-                    all_future_books.append({
-                        'title': book['title'],
-                        'author': book['author'],  # Now properly contains the author name
-                        'series': rec['series_name'],  # Series name from OpenAI response
-                        'explanation': rec['rationale'],
-                        'justbookify_link': rec['justbookify_link']
-                    })
-            
-            # Remove books already used in current recommendations
-            used_titles = set(book['title'] for book in current_recs)
-            available_books = [book for book in all_future_books if book['title'] not in used_titles]
-            
-            # If we don't have enough books for 3 months (12 books), generate fallback recommendations
-            min_books_needed = 12  # 4 books × 3 months
-            if len(available_books) < min_books_needed:
-                print(f"Warning: Only {len(available_books)} books available for future months, need {min_books_needed}")
-                
-                # Add fallback books by creating additional recommendations from the same series
-                fallback_books = []
-                for book in current_recs:
-                    fallback_book = book.copy()
-                    series_name = book.get('series', book['author'])
-                    fallback_book['title'] = f"Additional {series_name} Book"
-                    fallback_book['explanation'] = f"Another great book from the {series_name} series that matches your child's interests"
-                    fallback_book['series'] = series_name
-                    fallback_books.append(fallback_book)
-                
-                # Extend available books with fallbacks if needed
-                while len(available_books) < min_books_needed and fallback_books:
-                    available_books.extend(fallback_books)
-                    if len(available_books) >= min_books_needed:
-                        break
-            
-            # Create 3 months of recommendations with exactly 4 books each
+            remaining_recs = recommendations[3:] if len(recommendations) > 3 else []
+
             for i in range(3):
                 month_books = []
-                start_idx = i * 4
-                end_idx = start_idx + 4
-                
-                # Get 4 books for this month
-                month_book_selection = available_books[start_idx:end_idx]
-                
-                # If we don't have enough books, cycle through available books
-                while len(month_book_selection) < 4 and available_books:
-                    remaining_needed = 4 - len(month_book_selection)
-                    # Get additional books, cycling through if needed
-                    additional_books = []
-                    for j in range(remaining_needed):
-                        book_idx = (start_idx + len(month_book_selection) + j) % len(available_books)
-                        book = available_books[book_idx].copy()
-                        # Avoid duplicates within the same month
-                        if book['title'] not in [b['title'] for b in month_book_selection + additional_books]:
-                            additional_books.append(book)
-                    month_book_selection.extend(additional_books)
-                    
-                    # Break if we can't get more unique books
-                    if len(additional_books) == 0:
-                        break
-                
-                # Ensure we have exactly 4 books (pad with available books if necessary)
-                while len(month_book_selection) < 4 and available_books:
-                    # Find a book not already in this month
-                    for book in available_books:
-                        if book['title'] not in [b['title'] for b in month_book_selection]:
-                            month_book_selection.append(book.copy())
-                            break
-                    else:
-                        # If no unique books available, duplicate with variation
-                        if available_books:
-                            book = available_books[0].copy()
-                            book['title'] = f"{book['title']} (Alternative Edition)"
-                            month_book_selection.append(book)
-                    
-                    if len(month_book_selection) >= 4:
-                        break
-                
-                # Take exactly 4 books
-                month_books = month_book_selection[:4]
-                
-                # Final validation: ensure exactly 4 books per month
-                if len(month_books) < 4:
-                    print(f"Warning: Month {i+1} only has {len(month_books)} books, padding with generic recommendations")
-                    while len(month_books) < 4:
+                month_start = i * 4  # Changed from 2 to 4 books per month
+                month_end = month_start + 4  # Changed from 2 to 4 books per month
+
+                for rec in remaining_recs[month_start:month_end]:
+                    for book in rec['sample_books'][:1]:
                         month_books.append({
-                            'title': f"Age-Appropriate Book #{len(month_books)+1}",
-                            'author': "Various Authors",
-                            'series': f"Curated {age}-Year-Old Collection",
-                            'explanation': f"Additional age-appropriate book recommendation carefully selected for {age}-year-old readers",
-                            'justbookify_link': f"https://www.justbookify.com/search?q=children+books+age+{age}&options%5Bprefix%5D=last"
+                            'title': book['title'],
+                            'author': rec['name'],
+                            'explanation': rec['rationale'],
+                            'justbookify_link': rec['justbookify_link']  # Also adding justbookify_link to future recommendations
                         })
 
                 future_recs.append({
@@ -953,11 +864,23 @@ Remember: Quality over quantity - only include books that are 100% suitable for 
                     'status': 'active'
                 }
                 
+                # Also capture any additional fields that might be present
+                additional_fields = [
+                    'fictionNonFictionRatio', 'topThreeGenres', 'fictionGenres', 
+                    'nonFictionGenres', 'additionalGenres', 'selectedGenres',
+                    'selectedInterests', 'nonFictionInterests', 'bookSeries'
+                ]
+                
+                for field in additional_fields:
+                    if field in data and data[field] is not None:
+                        plan_data[field] = data[field]
+                
                 # Insert the recommendation plan
                 result = recommendation_plans_collection.insert_one(plan_data)
                 plan_id = str(result.inserted_id)
                 
                 print(f"Saved recommendation plan with ID: {plan_id}")
+                print(f"Saved data fields: {list(plan_data.keys())}")
                 
                 return jsonify({
                     'current': current_recs,
@@ -1018,13 +941,13 @@ def send_email_recommendations():
         
         <h3>Current Recommendations:</h3>
         <ul>
-        {''.join(f'<li><strong>{book["title"]}</strong><br/>Series: {book.get("series", book["author"])}<br/>Author: {book["author"]}<br/><em>{book.get("explanation", "")}</em></li>' for book in data['recommendations'])}
+        {''.join(f'<li><strong>{book["title"]}</strong> by {book["author"]}<br/><em>{book.get("explanation", "")}</em></li>' for book in data['recommendations'])}
         </ul>
 
         <h3>Recommended Series and Authors:</h3>
         {''.join(f'''
         <div style="margin-bottom: 20px;">
-            <h4><a href="{rec['justbookify_link']}" target="_blank">{rec['series_name']}</a> by {rec['author_name']} (Confidence Score: {rec.get('confidence_score', 'N/A')}/10)</h4>
+            <h4><a href="{rec['justbookify_link']}" target="_blank">{rec['name']}</a> (Confidence Score: {rec.get('confidence_score', 'N/A')}/10)</h4>
             <p><em>{rec.get('rationale', '')}</em></p>
             <ul>
             {''.join(f'<li><strong>{book["title"]}</strong> by {book["author"]}</li>' for book in rec.get('sample_books', []))}
@@ -1037,7 +960,7 @@ def send_email_recommendations():
         <div style="margin-bottom: 20px;">
             <h4>{month['month']}</h4>
             <ul>
-            {''.join(f'<li><strong>{book["title"]}</strong><br/>Series: {book.get("series", book["author"])}<br/>Author: {book["author"]}<br/><em>{book.get("explanation", "")}</em></li>' for book in month['books'])}
+            {''.join(f'<li><strong>{book["title"]}</strong> by {book["author"]}<br/><em>{book.get("explanation", "")}</em></li>' for book in month['books'])}
             </ul>
         </div>
         ''' for month in data['readingPlan'])}
@@ -1647,17 +1570,24 @@ def complete_quiz():
             'status': 'completed'
         }
         
-        # Add all quiz data fields
+        # Add all quiz data fields - expanded to capture everything
         quiz_fields = [
             'name', 'age', 'parentEmail', 'parentPhone', 'parentReading',
             'selectedGenres', 'selectedInterests', 'nonFictionInterests',
             'topThreeGenres', 'fictionGenres', 'nonFictionGenres',
-            'additionalGenres', 'fictionNonFictionRatio', 'bookSeries'
+            'additionalGenres', 'fictionNonFictionRatio', 'bookSeries',
+            'fictionNonFictionRatio', 'topThreeGenres', 'fictionGenres', 
+            'nonFictionGenres', 'additionalGenres'
         ]
         
         for field in quiz_fields:
-            if field in data:
+            if field in data and data[field] is not None:
                 update_data[field] = data[field]
+        
+        # Also save any additional fields that might be present
+        for key, value in data.items():
+            if key not in ['userId', 'completedAt'] and value is not None:
+                update_data[key] = value
         
         result = quiz_users_collection.update_one(
             {'_id': ObjectId(user_id)},
@@ -2111,5 +2041,236 @@ def get_recommendation_plans_stats():
 
 # ==================== END RECOMMENDATION PLANS API ENDPOINTS ====================
 
+# ==================== EXCEL EXPORT ENDPOINTS ====================
+
+@app.route('/export/excel', methods=['GET'])
+def export_to_excel():
+    try:
+        # Get query parameters for filtering
+        status = request.args.get('status', 'all')
+        email = request.args.get('email')
+        
+        # Build filter
+        filter_query = {}
+        if status and status != 'all':
+            filter_query['status'] = status
+        if email:
+            filter_query['parentEmail'] = {'$regex': email, '$options': 'i'}
+        
+        # Get all recommendation plans
+        plans = list(recommendation_plans_collection.find(filter_query).sort('createdAt', -1))
+        
+        # Get all quiz users
+        quiz_users = list(quiz_users_collection.find(filter_query).sort('createdAt', -1))
+        
+        # Create Excel file with multiple sheets
+        with pd.ExcelWriter('book_recommendations_export.xlsx', engine='openpyxl') as writer:
+            
+            # Sheet 1: Complete User Data
+            user_data = []
+            for plan in plans:
+                user_data.append({
+                    'User ID': str(plan.get('_id', '')),
+                    'Name': plan.get('name', ''),
+                    'Age': plan.get('age', ''),
+                    'Parent Email': plan.get('parentEmail', ''),
+                    'Parent Phone': plan.get('parentPhone', ''),
+                    'Parent Reading Habits': plan.get('parentReading', ''),
+                    'Selected Genres': ', '.join(plan.get('selectedGenres', [])),
+                    'Selected Interests': ', '.join(plan.get('selectedInterests', [])),
+                    'Non-Fiction Interests': ', '.join(plan.get('nonFictionInterests', [])),
+                    'Top Three Genres': ', '.join(plan.get('topThreeGenres', [])),
+                    'Fiction Genres': ', '.join(plan.get('fictionGenres', [])),
+                    'Non-Fiction Genres': ', '.join(plan.get('nonFictionGenres', [])),
+                    'Additional Genres': ', '.join(plan.get('additionalGenres', [])),
+                    'Fiction/Non-Fiction Ratio': plan.get('fictionNonFictionRatio', ''),
+                    'Book Series Preferences': str(plan.get('bookSeries', [])),
+                    'Status': plan.get('status', ''),
+                    'Created Date': plan.get('createdAt', ''),
+                    'Updated Date': plan.get('updatedAt', '')
+                })
+            
+            # Add quiz users that don't have recommendation plans
+            for user in quiz_users:
+                # Check if this user already has a recommendation plan
+                existing_plan = next((p for p in plans if p.get('parentEmail') == user.get('parentEmail')), None)
+                if not existing_plan:
+                    user_data.append({
+                        'User ID': str(user.get('_id', '')),
+                        'Name': user.get('name', ''),
+                        'Age': user.get('age', ''),
+                        'Parent Email': user.get('parentEmail', ''),
+                        'Parent Phone': user.get('parentPhone', ''),
+                        'Parent Reading Habits': user.get('parentReading', ''),
+                        'Selected Genres': ', '.join(user.get('selectedGenres', [])),
+                        'Selected Interests': ', '.join(user.get('selectedInterests', [])),
+                        'Non-Fiction Interests': ', '.join(user.get('nonFictionInterests', [])),
+                        'Top Three Genres': ', '.join(user.get('topThreeGenres', [])),
+                        'Fiction Genres': ', '.join(user.get('fictionGenres', [])),
+                        'Non-Fiction Genres': ', '.join(user.get('nonFictionGenres', [])),
+                        'Additional Genres': ', '.join(user.get('additionalGenres', [])),
+                        'Fiction/Non-Fiction Ratio': user.get('fictionNonFictionRatio', ''),
+                        'Book Series Preferences': str(user.get('bookSeries', [])),
+                        'Status': user.get('status', ''),
+                        'Created Date': user.get('createdAt', ''),
+                        'Updated Date': user.get('updatedAt', '')
+                    })
+            
+            df_users = pd.DataFrame(user_data)
+            df_users.to_excel(writer, sheet_name='User_Data', index=False)
+            
+            # Sheet 2: Current Recommendations
+            current_recs_data = []
+            for plan in plans:
+                if plan.get('currentRecommendations'):
+                    for rec in plan['currentRecommendations']:
+                        current_recs_data.append({
+                            'User Name': plan.get('name', ''),
+                            'User Email': plan.get('parentEmail', ''),
+                            'Book Title': rec.get('title', ''),
+                            'Author/Series': rec.get('author', ''),
+                            'Explanation': rec.get('explanation', ''),
+                            'JustBookify Link': rec.get('justbookify_link', ''),
+                            'Recommendation Type': 'Current Month'
+                        })
+            
+            df_current = pd.DataFrame(current_recs_data)
+            if not df_current.empty:
+                df_current.to_excel(writer, sheet_name='Current_Recommendations', index=False)
+            
+            # Sheet 3: Monthly Reading Plans
+            monthly_plans_data = []
+            for plan in plans:
+                if plan.get('futureRecommendations'):
+                    for month_plan in plan['futureRecommendations']:
+                        month_name = month_plan.get('month', '')
+                        for book in month_plan.get('books', []):
+                            monthly_plans_data.append({
+                                'User Name': plan.get('name', ''),
+                                'User Email': plan.get('parentEmail', ''),
+                                'Month': month_name,
+                                'Book Title': book.get('title', ''),
+                                'Author/Series': book.get('author', ''),
+                                'Explanation': book.get('explanation', ''),
+                                'JustBookify Link': book.get('justbookify_link', ''),
+                                'Recommendation Type': 'Monthly Plan'
+                            })
+            
+            df_monthly = pd.DataFrame(monthly_plans_data)
+            if not df_monthly.empty:
+                df_monthly.to_excel(writer, sheet_name='Monthly_Reading_Plans', index=False)
+            
+            # Sheet 4: Series/Author Recommendations
+            series_recs_data = []
+            for plan in plans:
+                if plan.get('recommendations'):
+                    for rec in plan['recommendations']:
+                        series_recs_data.append({
+                            'User Name': plan.get('name', ''),
+                            'User Email': plan.get('parentEmail', ''),
+                            'Series/Author Name': rec.get('name', ''),
+                            'Confidence Score': rec.get('confidence_score', ''),
+                            'Rationale': rec.get('rationale', ''),
+                            'JustBookify Link': rec.get('justbookify_link', ''),
+                            'Sample Books': ', '.join([book.get('title', '') for book in rec.get('sample_books', [])])
+                        })
+            
+            df_series = pd.DataFrame(series_recs_data)
+            if not df_series.empty:
+                df_series.to_excel(writer, sheet_name='Series_Recommendations', index=False)
+            
+            # Sheet 5: Book Series Responses
+            book_series_data = []
+            for plan in plans:
+                if plan.get('bookSeries'):
+                    for series in plan['bookSeries']:
+                        book_series_data.append({
+                            'User Name': plan.get('name', ''),
+                            'User Email': plan.get('parentEmail', ''),
+                            'Series ID': series.get('seriesId', ''),
+                            'Has Read': series.get('hasRead', ''),
+                            'Response': series.get('response', ''),
+                            'Timestamp': series.get('timestamp', '')
+                        })
+            
+            df_book_series = pd.DataFrame(book_series_data)
+            if not df_book_series.empty:
+                df_book_series.to_excel(writer, sheet_name='Book_Series_Responses', index=False)
+            
+            # Sheet 6: Summary Statistics
+            summary_data = []
+            total_users = len(user_data)
+            active_plans = len([p for p in plans if p.get('status') == 'active'])
+            inactive_plans = len([p for p in plans if p.get('status') == 'inactive'])
+            
+            # Age group breakdown
+            age_groups = {}
+            for plan in plans:
+                age = plan.get('age')
+                if age:
+                    if age < 5:
+                        group = 'Below 5'
+                    elif 5 <= age <= 8:
+                        group = '6-8'
+                    elif 9 <= age <= 10:
+                        group = '9-10'
+                    elif 11 <= age <= 12:
+                        group = '11-12'
+                    else:
+                        group = '13+'
+                    age_groups[group] = age_groups.get(group, 0) + 1
+            
+            summary_data.append({
+                'Metric': 'Total Users',
+                'Value': total_users
+            })
+            summary_data.append({
+                'Metric': 'Active Plans',
+                'Value': active_plans
+            })
+            summary_data.append({
+                'Metric': 'Inactive Plans',
+                'Value': inactive_plans
+            })
+            
+            for group, count in age_groups.items():
+                summary_data.append({
+                    'Metric': f'Users Age {group}',
+                    'Value': count
+                })
+            
+            df_summary = pd.DataFrame(summary_data)
+            df_summary.to_excel(writer, sheet_name='Summary_Statistics', index=False)
+        
+        # Read the file and return it
+        with open('book_recommendations_export.xlsx', 'rb') as f:
+            file_content = f.read()
+        
+        # Clean up the file
+        import os
+        os.remove('book_recommendations_export.xlsx')
+        
+        from flask import send_file
+        from io import BytesIO
+        
+        # Create response with file
+        output = BytesIO(file_content)
+        output.seek(0)
+        
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f'book_recommendations_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+        )
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+# ==================== END EXCEL EXPORT ENDPOINTS ====================
+
 if __name__ == '__main__':
-    app.run(debug=True, port=5121)
+    app.run(debug=True)
