@@ -2356,6 +2356,7 @@ def export_to_excel():
             # This sheet shows user responses to book series questions during the quiz
             # Series Name: The actual name of the book series/author (mapped from seriesId)
             # Series ID: The original identifier used during the quiz process
+            # Mapping Status: Whether the seriesId was successfully mapped to a series name
             book_series_data = []
             for plan in plans:
                 if plan.get('bookSeries'):
@@ -2363,22 +2364,50 @@ def export_to_excel():
                     series_id_to_name = {}
                     
                     # If we have recommendations, use them to map seriesId to series name
-                    if plan.get('recommendations'):
+                    if plan.get('recommendations') and len(plan['recommendations']) > 0:
+                        # Create comprehensive mapping for seriesId to series name
+                        series_id_to_name = {}
+                        
+                        # Method 1: Map by index (most common case)
                         for i, rec in enumerate(plan['recommendations']):
-                            # Map by index (most likely case)
                             series_id_to_name[str(i)] = rec.get('name', 'Unknown Series')
-                            # Also map by any other potential ID fields
-                            if 'id' in rec:
-                                series_id_to_name[rec['id']] = rec.get('name', 'Unknown Series')
-                            # Map by confidence score if available
-                            if 'confidence_score' in rec:
+                        
+                        # Method 2: Map by any ID field if it exists
+                        for rec in plan['recommendations']:
+                            if 'id' in rec and rec['id']:
+                                series_id_to_name[str(rec['id'])] = rec.get('name', 'Unknown Series')
+                        
+                        # Method 3: Map by confidence score if available
+                        for rec in plan['recommendations']:
+                            if 'confidence_score' in rec and rec['confidence_score']:
                                 series_id_to_name[str(rec['confidence_score'])] = rec.get('name', 'Unknown Series')
+                        
+                        # Method 4: Map by series name itself (fallback)
+                        for rec in plan['recommendations']:
+                            if 'name' in rec and rec['name']:
+                                series_id_to_name[rec['name']] = rec.get('name', 'Unknown Series')
                     
                     for series in plan['bookSeries']:
                         series_id = series.get('seriesId', '')
                         # Try to get the series name from the mapping
                         # The seriesId is typically the index in the recommendations array
-                        series_name = series_id_to_name.get(str(series_id), f'Series ID: {series_id}')
+                        series_name = series_id_to_name.get(str(series_id), '')
+                        
+                        # If mapping failed, try to get a meaningful name
+                        if not series_name:
+                            # Try to find the series in recommendations by other means
+                            for rec in plan.get('recommendations', []):
+                                if (str(rec.get('id', '')) == str(series_id) or 
+                                    str(rec.get('confidence_score', '')) == str(series_id) or
+                                    str(plan['recommendations'].index(rec)) == str(series_id)):
+                                    series_name = rec.get('name', f'Series ID: {series_id}')
+                                    break
+                            
+                            # If still no name found, use a descriptive fallback
+                            if not series_name:
+                                series_name = f'Series ID: {series_id} (Mapping failed)'
+                        
+
                         
 
                         
@@ -2387,7 +2416,7 @@ def export_to_excel():
                             'User Email': plan.get('parentEmail', ''),
                             'Series Name': series_name,
                             'Series ID': series_id,
-                            'Mapping Status': 'Mapped' if series_name != f'Series ID: {series_id}' else 'Not Mapped',
+                            'Mapping Status': 'Mapped' if not series_name.startswith('Series ID:') else 'Not Mapped',
                             'Has Read': series.get('hasRead', ''),
                             'Response': series.get('response', ''),
                             'Timestamp': series.get('timestamp', '')
