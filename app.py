@@ -58,6 +58,19 @@ FACEBOOK_ACCESS_TOKEN = os.getenv('FACEBOOK_ACCESS_TOKEN')
 WHATSAPP_PHONE_NUMBER_ID = os.getenv('WHATSAPP_PHONE_NUMBER_ID')
 WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv('WHATSAPP_BUSINESS_ACCOUNT_ID')
 
+# Helper function to clean response values for better readability
+def clean_response(response):
+    if not response:
+        return 'No response'
+    response_map = {
+        'love': 'Love',
+        'like': 'Like', 
+        'didNotEnjoy': 'Did Not Enjoy',
+        'dontReadAnymore': 'Don\'t Read Anymore',
+        'neutral': 'Neutral'
+    }
+    return response_map.get(response, response.title())
+
 # Helper function to convert ObjectId to string in documents
 def format_document(doc):
     if doc is None:
@@ -2242,6 +2255,30 @@ def export_to_excel():
             # Sheet 1: Complete User Data
             user_data = []
             for plan in plans:
+                # Create series name mapping for this plan
+                series_id_to_name = {}
+                if plan.get('recommendations') and len(plan['recommendations']) > 0:
+                    # Map seriesId to series name using recommendations
+                    for i, rec in enumerate(plan['recommendations']):
+                        series_id_to_name[str(i)] = rec.get('name', 'Unknown Series')
+                    
+                    # Also map by any ID field if it exists
+                    for rec in plan['recommendations']:
+                        if 'id' in rec and rec['id']:
+                            series_id_to_name[str(rec['id'])] = rec.get('name', 'Unknown Series')
+                
+                # Format book series preferences as readable text
+                book_series_text = []
+                if plan.get('bookSeries'):
+                    for series in plan['bookSeries']:
+                        series_id = series.get('seriesId', '')
+                        series_name = series_id_to_name.get(str(series_id), f"Series {series_id[-8:] if len(series_id) > 8 else series_id}")
+                        has_read = 'Yes' if series.get('hasRead') else 'No'
+                        response = clean_response(series.get('response'))
+                        book_series_text.append(f"{series_name}: {response} ({has_read})")
+                
+                book_series_preferences = '; '.join(book_series_text) if book_series_text else 'None'
+                
                 user_data.append({
                     'User ID': str(plan.get('_id', '')),
                     'Name': plan.get('name', ''),
@@ -2257,7 +2294,7 @@ def export_to_excel():
                     'Non-Fiction Genres': ', '.join(plan.get('nonFictionGenres', [])),
                     'Additional Genres': ', '.join(plan.get('additionalGenres', [])),
                     'Fiction/Non-Fiction Ratio': plan.get('fictionNonFictionRatio', ''),
-                    'Book Series Preferences': str(plan.get('bookSeries', [])),
+                    'Book Series Preferences': book_series_preferences,
                     'Status': plan.get('status', ''),
                     'Created Date': plan.get('createdAt', ''),
                     'Updated Date': plan.get('updatedAt', '')
@@ -2268,6 +2305,23 @@ def export_to_excel():
                 # Check if this user already has a recommendation plan
                 existing_plan = next((p for p in plans if p.get('parentEmail') == user.get('parentEmail')), None)
                 if not existing_plan:
+                    # Format book series preferences as readable text for quiz users
+                    book_series_text = []
+                    if user.get('bookSeries'):
+                        for series in user['bookSeries']:
+                            series_id = series.get('seriesId', '')
+                            # Create a readable series name for quiz users
+                            if len(series_id) > 8:
+                                readable_part = series_id[-8:]  # Last 8 characters
+                            else:
+                                readable_part = series_id
+                            series_name = f"Series {readable_part}"
+                            has_read = 'Yes' if series.get('hasRead') else 'No'
+                            response = clean_response(series.get('response'))
+                            book_series_text.append(f"{series_name}: {response} ({has_read})")
+                    
+                    book_series_preferences = '; '.join(book_series_text) if book_series_text else 'None'
+                    
                     user_data.append({
                         'User ID': str(user.get('_id', '')),
                         'Name': user.get('name', ''),
@@ -2283,7 +2337,7 @@ def export_to_excel():
                         'Non-Fiction Genres': ', '.join(user.get('nonFictionGenres', [])),
                         'Additional Genres': ', '.join(user.get('additionalGenres', [])),
                         'Fiction/Non-Fiction Ratio': user.get('fictionNonFictionRatio', ''),
-                        'Book Series Preferences': str(user.get('bookSeries', [])),
+                        'Book Series Preferences': book_series_preferences,
                         'Status': user.get('status', ''),
                         'Created Date': user.get('createdAt', ''),
                         'Updated Date': user.get('updatedAt', '')
@@ -2355,8 +2409,8 @@ def export_to_excel():
             # Sheet 5: Book Series Responses
             # This sheet shows user responses to book series questions during the quiz
             # Series Name: The actual name of the book series/author (mapped from seriesId)
-            # Series ID: The original identifier used during the quiz process
-            # Mapping Status: Whether the seriesId was successfully mapped to a series name
+            # Has Read: Whether the user has read this series (Yes/No)
+            # Response: User's response to the series (love, like, didNotEnjoy, etc.)
             book_series_data = []
             for plan in plans:
                 if plan.get('bookSeries'):
@@ -2365,10 +2419,10 @@ def export_to_excel():
                     
                     # If we have recommendations, use them to map seriesId to series name
                     if plan.get('recommendations') and len(plan['recommendations']) > 0:
-                        # Create comprehensive mapping for seriesId to series name
+                        # Create mapping from seriesId to series name
                         series_id_to_name = {}
                         
-                        # Method 1: Map by index (most common case)
+                        # Method 1: Map by index (most common case - seriesId is usually the array index)
                         for i, rec in enumerate(plan['recommendations']):
                             series_id_to_name[str(i)] = rec.get('name', 'Unknown Series')
                         
@@ -2376,50 +2430,28 @@ def export_to_excel():
                         for rec in plan['recommendations']:
                             if 'id' in rec and rec['id']:
                                 series_id_to_name[str(rec['id'])] = rec.get('name', 'Unknown Series')
-                        
-                        # Method 3: Map by confidence score if available
-                        for rec in plan['recommendations']:
-                            if 'confidence_score' in rec and rec['confidence_score']:
-                                series_id_to_name[str(rec['confidence_score'])] = rec.get('name', 'Unknown Series')
-                        
-                        # Method 4: Map by series name itself (fallback)
-                        for rec in plan['recommendations']:
-                            if 'name' in rec and rec['name']:
-                                series_id_to_name[rec['name']] = rec.get('name', 'Unknown Series')
                     
+                    # Process each book series response
                     for series in plan['bookSeries']:
                         series_id = series.get('seriesId', '')
                         # Try to get the series name from the mapping
-                        # The seriesId is typically the index in the recommendations array
                         series_name = series_id_to_name.get(str(series_id), '')
                         
-                        # If mapping failed, try to get a meaningful name
+                        # If mapping failed, create a readable fallback
                         if not series_name:
-                            # Try to find the series in recommendations by other means
-                            for rec in plan.get('recommendations', []):
-                                if (str(rec.get('id', '')) == str(series_id) or 
-                                    str(rec.get('confidence_score', '')) == str(series_id) or
-                                    str(plan['recommendations'].index(rec)) == str(series_id)):
-                                    series_name = rec.get('name', f'Series ID: {series_id}')
-                                    break
-                            
-                            # If still no name found, use a descriptive fallback
-                            if not series_name:
-                                series_name = f'Series ID: {series_id} (Mapping failed)'
-                        
-
-                        
-
+                            # Create a readable name from the seriesId
+                            if len(series_id) > 8:
+                                readable_part = series_id[-8:]  # Last 8 characters
+                            else:
+                                readable_part = series_id
+                            series_name = f"Series {readable_part}"
                         
                         book_series_data.append({
                             'User Name': plan.get('name', ''),
                             'User Email': plan.get('parentEmail', ''),
                             'Series Name': series_name,
-                            'Series ID': series_id,
-                            'Mapping Status': 'Mapped' if not series_name.startswith('Series ID:') else 'Not Mapped',
-                            'Has Read': series.get('hasRead', ''),
-                            'Response': series.get('response', ''),
-                            'Timestamp': series.get('timestamp', '')
+                            'Has Read': 'Yes' if series.get('hasRead') else 'No',
+                            'Response': clean_response(series.get('response'))
                         })
             
             # Also add book series responses from quiz users who don't have recommendation plans yet
@@ -2430,15 +2462,19 @@ def export_to_excel():
                     if not existing_plan:
                         for series in user['bookSeries']:
                             series_id = series.get('seriesId', '')
+                            # Create a readable series name for quiz users
+                            if len(series_id) > 8:
+                                readable_part = series_id[-8:]  # Last 8 characters
+                            else:
+                                readable_part = series_id
+                            readable_series_name = f"Series {readable_part} (Quiz completed)"
+                            
                             book_series_data.append({
                                 'User Name': user.get('name', ''),
                                 'User Email': user.get('parentEmail', ''),
-                                'Series Name': f'Series ID: {series_id} (Quiz completed, recommendations pending)',
-                                'Series ID': series_id,
-                                'Mapping Status': 'Pending Recommendations',
-                                'Has Read': series.get('hasRead', ''),
-                                'Response': series.get('response', ''),
-                                'Timestamp': series.get('timestamp', '')
+                                'Series Name': readable_series_name,
+                                'Has Read': 'Yes' if series.get('hasRead') else 'No',
+                                'Response': clean_response(series.get('response'))
                             })
             
             df_book_series = pd.DataFrame(book_series_data)
@@ -2519,6 +2555,33 @@ def export_to_excel():
         }), 500
 
 # ==================== END EXCEL EXPORT ENDPOINTS ====================
+
+# Test endpoint to see book series data structure
+@app.route('/test/book-series-data', methods=['GET'])
+def test_book_series_data():
+    try:
+        # Get a sample plan with book series data
+        sample_plan = recommendation_plans_collection.find_one({'bookSeries': {'$exists': True, '$ne': []}})
+        if sample_plan:
+            return jsonify({
+                'success': True,
+                'sample_plan': {
+                    'name': sample_plan.get('name'),
+                    'age': sample_plan.get('age'),
+                    'bookSeries': sample_plan.get('bookSeries', []),
+                    'recommendations': sample_plan.get('recommendations', [])
+                }
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'No plans with book series data found'
+            })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 # Test endpoint to verify 4 books per month logic - SIMPLIFIED VERSION
 @app.route('/test/4-books-per-month', methods=['GET'])
